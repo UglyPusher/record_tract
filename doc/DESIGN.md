@@ -15,9 +15,10 @@ dispatch records to them, schedule them, or automatically derive reclamation
 from their progress; those relationships belong to the composition.
 
 `Frontier` owns one monotonic exclusive-end atomic. Ordinary constness separates
-capabilities: an upstream `const Frontier&` can only acquire, while a Slider
-holds its own `Frontier&` and may publish. This preserves one runtime publisher
-for every processing frontier.
+normal stage capabilities: an upstream `const Frontier&` can only acquire,
+while a Slider holds its own `Frontier&` and may publish. `Frontier::publish()`
+is public and does not enforce publisher identity; the composition therefore
+designates exactly one runtime publisher for each processing frontier.
 
 `Slider<Module>` is a header-only template over its concrete module. Its source
 is `RecordTape`; it reads either the tape head or an explicit upstream
