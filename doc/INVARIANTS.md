@@ -29,8 +29,11 @@ A slider's own Frontier is its single authoritative current exclusive end:
 own frontier <= observed upstream frontier
 ```
 
-- The upstream reference is const and therefore read-only.
-- Only the slider holding its own non-const frontier reference publishes it.
+- The upstream reference is const and therefore read-only through that
+  reference.
+- The composition designates exactly one runtime publisher for each processing
+  frontier; a Slider normally holds that frontier's non-const reference and
+  publishes it. `Frontier` itself does not enforce publisher identity.
 - A range must begin at the own Frontier value acquired at entry and end no
   later than the acquired upstream frontier.
 - A record view is obtained by its absolute zero-based position.
@@ -71,7 +74,7 @@ retention.
 
 The number of stages is not part of the tract contract. A composition may also
 have multiple stages consuming from the same upstream boundary; each processing
-frontier remains independently owned by its publishing stage.
+frontier has one publisher designated by that composition.
 
 ## Core Ownership
 
@@ -130,7 +133,8 @@ head - tail <= capacity
   caller-owned retention contract; accessibility does not prove durability.
 - Position `p` maps to block `p % capacity` only after absolute range
   validation.
-- Only `PersistenceSlider` publishes the `durable` frontier.
+- The composition designates `PersistenceSlider` as the sole runtime publisher
+  of the `durable` frontier.
 - Append and physical sync of the complete selected batch happen before
   publication of its batch-end durable frontier.
 - A downstream stage that requires durability must acquire and obey the
