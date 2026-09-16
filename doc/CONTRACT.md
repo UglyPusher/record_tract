@@ -101,10 +101,13 @@ module frontier alone does not release storage or remove producer backpressure.
 
 `PhysicalWalConfig` contains persisted identity and physical layout fields and
 does not contain runtime capacity. `PersistenceModule` owns the selected live
-physical writer and its terminal failure state. It does not own or publish a
-frontier and does not select batches. `process(record)` is its slider-facing
-append operation. Persistence failure publication is atomic so the producer
-role can stop after observing a terminal append or sync failure.
+physical writer and its failure state for the current open writer lifetime. It
+does not own or publish a frontier and does not select batches.
+`process(record)` is its slider-facing append operation. Append or sync failure
+is terminal until that writer lifetime is closed; a later successful `open()`
+starts a new writer lifetime and clears the failure state. Failure publication
+is atomic so the producer role can stop after observing a terminal append or
+sync failure.
 
 ```cpp
 class PersistenceModule {
@@ -135,15 +138,17 @@ public:
 a bounded batch, appends every selected record, synchronizes the complete batch
 once, and only then publishes its frontier. In a persistence composition that
 frontier is conventionally named `durable`. Append or sync failure leaves
-durable progress unchanged and is terminal for the module.
+durable progress unchanged and is terminal for the current open writer
+lifetime.
 
 ### Physical WAL Payload And Identity
 
 Each physical WAL instance has one non-zero `payload_size`, one file-level
-`payload_schema_version`, one stream identity, one epoch, one non-zero
-`first_sequence`, and bounded non-zero runtime `capacity`. Payload bytes and the
-meaning of the schema version are opaque to the WAL. Schema version `0` is
-reserved for callers that do not declare an application payload schema.
+`payload_schema_version`, one stream identity, one epoch, and one non-zero
+`first_sequence`. Payload bytes and the meaning of the schema version are opaque
+to the WAL. Schema version `0` is reserved for callers that do not declare an
+application payload schema. Runtime `capacity` belongs to the in-memory tract
+configuration and is not a property of the physical WAL file.
 
 Generic infrastructure WALs may use zero stream, epoch, and manifest identities.
 Command and Event WALs require non-zero `stream_id`, `epoch_id`, and
@@ -157,18 +162,25 @@ of every remaining byte.
 The cold-path API in `reader.hpp` provides `WalReader` and `scan_wal()`.
 `WalReader::open()` requires the expected persisted WAL configuration; runtime
 capacity is ignored. `read_next()` is sequential and allocation-free after
-open. It returns `Record` only after complete physical validation.
+open. It returns `Record` only after complete physical validation. Supplying an
+output span whose size differs from the configured payload size returns
+`ReadStatus::InvalidPayloadSize` without advancing the reader or making the
+reader failed; a subsequent call with a correctly sized span addresses the same
+next record.
 
 The file must be quiescent: no writer may append, synchronize, truncate, or
 replace it while a reader or scanner is active. Validation proves physical
 integrity, not the still-open runtime writer's durable frontier. After a crash,
-the maximal contiguous CRC-valid prefix is the authoritative recovered WAL and
-all of its records participate in replay and rebuild.
+the maximal contiguous fully validated prefix is the authoritative recovered
+WAL and all of its records participate in replay and rebuild. Validation of
+that prefix includes file identity and format, header integrity, contiguous
+sequence, payload integrity, record boundaries, and zero padding; it is not
+limited to CRC checks.
 
 The reader validates file identity, format, header CRC, record header CRC,
 contiguous sequence, payload CRC, record boundaries, and zero padding. Any
-failure is terminal for that reader instance. It never skips or attempts to
-resynchronize after a damaged record.
+physical validation failure is terminal for that reader instance. It never
+skips or attempts to resynchronize after a damaged record.
 
 `scan_wal()` is read-only. It returns the longest trusted record prefix and its
 ending file offset. Partial record header, payload, or padding is classified as
@@ -314,13 +326,13 @@ POSIX, and `fsync` on macOS. Creating a file also synchronizes its initial
 header; POSIX creation additionally synchronizes the parent directory entry.
 
 Append or sync failure leaves `durable` unchanged and puts
-`PersistenceModule` into its terminal failed state. On sync failure, records
-from the failed batch may already have been appended to the physical file;
-there is no rollback or truncation in the live writer. Those records remain
-invisible to downstream runtime stages because `durable` is not advanced.
-After a crash or writer shutdown, the authoritative physical history is instead
-determined by validated WAL scanning and recovery rules, independently of the
-lost runtime `durable` frontier.
+`PersistenceModule` into its terminal failed state for the current open writer
+lifetime. On sync failure, records from the failed batch may already have been
+appended to the physical file; there is no rollback or truncation in the live
+writer. Those records remain invisible to downstream runtime stages because
+`durable` is not advanced. After a crash or writer shutdown, the authoritative
+physical history is instead determined by validated WAL scanning and recovery
+rules, independently of the lost runtime `durable` frontier.
 
 ## Lifecycle
 
@@ -330,9 +342,11 @@ initialized by the composition.
 
 `PersistenceModule::open()` creates and physically synchronizes a new WAL file.
 Creation is exclusive: an existing path returns `OpenStatus::FileAlreadyExists`
-and is not modified. Cold-path incomplete-tail recovery is an explicit,
-separate operation and does not reopen the live writer. The composition is
-responsible for stopping all roles and closing the components in a safe order.
+and is not modified. A successful open starts a new writer lifetime and clears
+any failure state left by a previous closed lifetime. Cold-path incomplete-tail
+recovery is an explicit, separate operation and does not reopen the live writer.
+The composition is responsible for stopping all roles and closing the
+components in a safe order.
 
 ## Intentional Limits
 
