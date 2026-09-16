@@ -57,11 +57,17 @@ position. Only the composition writes `tail`, after the corresponding slider
 call has returned and its borrowed views are retired. Stopping either slider
 execution or composition reclamation therefore preserves bounded backpressure.
 
-For a linear chain of processing stages, the ordering generalizes to:
+For a linear dependency chain of processing stages, processing progress obeys:
 
 ```text
-tail <= Fn <= ... <= F2 <= F1 <= head
+Fn <= ... <= F2 <= F1 <= head
 ```
+
+This ordering describes processing dependencies only; it does not define the
+reclamation boundary. Independently, `RecordTape` always maintains
+`tail <= head`. The composition may advance `tail` only to a boundary proven
+safe for every mandatory stage, reader, or other participant that protects
+retention.
 
 The number of stages is not part of the tract contract. A composition may also
 have multiple stages consuming from the same upstream boundary; each processing
