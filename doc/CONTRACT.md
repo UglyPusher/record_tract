@@ -134,6 +134,23 @@ once, and only then publishes its frontier. In a persistence composition that
 frontier is conventionally named `durable`. Append or sync failure leaves
 durable progress unchanged and is terminal for the module.
 
+### Physical WAL Payload And Identity
+
+Each physical WAL instance has one non-zero `payload_size`, one file-level
+`payload_schema_version`, one stream identity, one epoch, one non-zero
+`first_sequence`, and bounded non-zero runtime `capacity`. Payload bytes and the
+meaning of the schema version are opaque to the WAL. Schema version `0` is
+reserved for callers that do not declare an application payload schema.
+
+Generic infrastructure WALs may use zero stream, epoch, and manifest identities.
+Command and Event WALs require non-zero `stream_id`, `epoch_id`, and
+`manifest_id`. Runtime `capacity` is not part of the physical file identity.
+
+`payload_size` is fixed for the entire file. Physical records do not carry an
+individual payload length. Application schemas that encode shorter logical
+values into the fixed payload are responsible for deterministic initialization
+of every remaining byte.
+
 The cold-path API in `reader.hpp` provides `WalReader` and `scan_wal()`.
 `WalReader::open()` requires the expected persisted WAL configuration; runtime
 capacity is ignored. `read_next()` is sequential and allocation-free after
@@ -196,22 +213,7 @@ reference. Other stages observe that frontier through const references. Stage
 topology, execution policy, and selection of the frontier or frontiers that
 protect reclamation belong to the composition.
 
-## Payload And Lifetime
-
-Each physical WAL instance has one non-zero `payload_size`, one file-level
-`payload_schema_version`, one stream identity, one epoch, one non-zero
-`first_sequence`, and bounded non-zero runtime `capacity`. Payload bytes and
-the meaning of the schema version are opaque to the WAL. Schema version `0` is
-reserved for callers that do not declare an application payload schema.
-
-Generic infrastructure WALs may use zero stream, epoch, and manifest identities.
-Command and Event WALs require non-zero `stream_id`, `epoch_id`, and
-`manifest_id`. Runtime `capacity` is not part of the physical file identity.
-
-`payload_size` is fixed for the entire file. Physical records do not carry an
-individual payload length. Application schemas that encode shorter logical
-values into the fixed payload are responsible for deterministic initialization
-of every remaining byte.
+## Payload Lifetime
 
 Publish input spans remain owned by the caller. Publication finishes its copy
 synchronously and does not retain the span or access caller memory after
