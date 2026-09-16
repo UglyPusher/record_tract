@@ -1,16 +1,87 @@
 # record_tract
 
-`record_tract` is a C++20 library for an ordered record tract.
+`record_tract` is a C++20 library for an ordered record tract: a bounded
+`RecordTape` with slider/frontier mechanics and separately composable physical
+WAL persistence. Low-level serialization helpers are exposed under
+`<fexma/binary/...>`.
 
-## Components
-
-- `wal`: `RecordTape`, slider/frontier mechanics, and persistence.
-- `binary`: low-level binary serialization helpers used by the library.
-
-## CMake Targets
+The exported CMake targets are:
 
 - `fexma::wal`
 - `fexma::binary`
+
+## Record Tape And Persistence
+
+`RecordTape` owns only:
+
+```text
+tail <= retained positions < head
+```
+
+`RecordTape` provides producer publication, absolute-position immutable views,
+bounded reclamation, and position exhaustion handling. `PersistenceModule`
+owns live append/sync and its failure state. Their lifecycles are independent.
+`PersistenceSlider` binds that module to `head`, reads its current position from
+the durable `Frontier`, and publishes that authoritative progress only after a
+complete batch sync.
+
+`Slider` provides synchronous stage mechanics over `RecordTape`. It reads
+either `RecordTape::head()` or an upstream `Frontier`, invokes one statically
+bound module in position order, and publishes its own `Frontier` after each
+successful record. It owns no worker, polling loop, wait strategy, or domain
+semantics. `NoOpModule` is the trivial successful stage used to prove the first
+bare composition: `head -> NoOpSlider -> tail`.
+
+RecordTape public value types live in `record_tape_types.hpp`; physical WAL
+format and lifecycle types live in `types.hpp`. RecordTape headers do not
+include the physical WAL types. The current RecordTape `default_alignment` and
+physical `wal_default_alignment` are both 64 but are independent defaults, not
+a shared contract.
+
+One static `RecordTape`/persistence-slider composition can be wired as:
+
+```text
+producer -> [durable, head) -> physical sync -> [tail, durable) -> consumer
+```
+
+That composition has three absolute frontiers:
+
+```text
+tail <= durable <= head
+head - tail <= capacity
+```
+
+`RecordTape::try_publish()` writes one block and publishes `head`.
+`PersistenceSlider::process_available()` appends a bounded batch, performs one
+OS-level physical sync, and then publishes `durable`. The composition reclaims
+positions through its final mandatory downstream frontier.
+
+`open()` creates only a new WAL file and never truncates an existing path. The
+physical file uses canonical little-endian headers and aligned record offsets.
+Its immutable identity binds one stream kind and ID to one epoch, manifest, and
+payload schema; runtime ring capacity is intentionally not persisted.
+
+`WalReader` opens an existing file only when its complete persisted identity
+matches the caller's expected configuration. It exposes a record only after
+validating physical headers, sequence, CRCs, payload, and zero padding.
+`scan_wal()` reports the longest trusted prefix without modifying the file.
+
+`recover_incomplete_tail()` is the separate, conservative mutation boundary.
+With exclusive ownership of a quiescent file, it may truncate only a physically
+incomplete trailing record to the scanner-proven trusted offset, synchronize
+that truncation, and validate the complete file again. Complete invalid records,
+middle corruption, sequence errors, and identity mismatches are refused without
+mutation.
+
+After crash, the maximal contiguous CRC-valid prefix is the authoritative WAL:
+every complete record in it participates in replay and rebuild regardless of
+client acknowledgement. Batches are live append-and-sync units only. The file
+contains no batch commit records or commit markers.
+
+Start with [CONTRACT.md](doc/CONTRACT.md), then see
+[DESIGN.md](doc/DESIGN.md) and [INVARIANTS.md](doc/INVARIANTS.md).
+The physical layout is in [FILE_FORMAT.md](doc/FILE_FORMAT.md); build and test
+commands are in [BUILDING.md](doc/BUILDING.md).
 
 ## Build And Test
 
@@ -19,8 +90,5 @@ cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
-
-Detailed WAL documentation is available in [`wal/README.md`](wal/README.md)
-and [`wal/doc/`](wal/doc/).
 
 Extracted from UglyPusher/ll_exp at commit 63681e8.
