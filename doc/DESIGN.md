@@ -7,6 +7,13 @@ publication, reclamation, position exhaustion, and borrowed read-only position
 access. It has no filesystem path, physical writer, durable frontier, or I/O
 failure state.
 
+The tract is single-publisher, multi-consumer at the record-flow level: one
+producer publishes the ordered record stream, while multiple independently
+coordinated processing stages or readers may consume retained records. This is
+not a built-in broadcast runtime. The library does not register consumers,
+dispatch records to them, schedule them, or automatically derive reclamation
+from their progress; those relationships belong to the composition.
+
 `Frontier` owns one monotonic exclusive-end atomic. Ordinary constness separates
 capabilities: an upstream `const Frontier&` can only acquire, while a Slider
 holds its own `Frontier&` and may publish. This preserves one runtime publisher
