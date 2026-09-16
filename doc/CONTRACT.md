@@ -295,8 +295,10 @@ Downstream stages may finish the already published valid prefix.
 ## Persistence Progress
 
 `PersistenceSlider::process_available()` selects at most its configured
-maximum count from `[durable, head)`. An empty selection is a successful no-op
-and performs no physical sync.
+maximum count from `[durable, head)`. A configured `maximum_count` of zero
+disables persistence processing: `process_available()` returns
+`SliderStatus::Empty` without appending or synchronizing even when
+`head > durable`. An empty selection for any reason performs no physical sync.
 
 For a non-empty batch the physical writer:
 
@@ -312,7 +314,13 @@ POSIX, and `fsync` on macOS. Creating a file also synchronizes its initial
 header; POSIX creation additionally synchronizes the parent directory entry.
 
 Append or sync failure leaves `durable` unchanged and puts
-`PersistenceModule` into its terminal failed state.
+`PersistenceModule` into its terminal failed state. On sync failure, records
+from the failed batch may already have been appended to the physical file;
+there is no rollback or truncation in the live writer. Those records remain
+invisible to downstream runtime stages because `durable` is not advanced.
+After a crash or writer shutdown, the authoritative physical history is instead
+determined by validated WAL scanning and recovery rules, independently of the
+lost runtime `durable` frontier.
 
 ## Lifecycle
 
