@@ -53,8 +53,11 @@ Position visible_downstream = frontier.acquire();
 
 Every frontier value is an exclusive end: value `N` certifies completion of
 positions `[0, N)`. `Frontier` owns one cache-line-isolated atomic. A Slider
-holds its own non-const frontier reference and is its only runtime publisher;
-downstream stages receive a const reference and can only acquire it.
+holds its own non-const frontier reference and may publish it; downstream
+stages receive a const reference and can only acquire it. The public
+`Frontier::publish()` operation does not enforce publisher identity, so a valid
+composition must designate exactly one runtime publisher for each processing
+frontier.
 
 `process_available()` is one synchronous call. It snapshots the upstream
 exclusive end, obtains every consecutive immutable `RecordView` through that
@@ -208,10 +211,12 @@ owns `reclaim()`. Coordinated read-only users may call `try_view()` while the
 retention precondition is maintained. `open()` and `close()` require all these
 roles to be stopped.
 
-Each processing frontier has one publisher: the Slider that owns its non-const
-reference. Other stages observe that frontier through const references. Stage
-topology, execution policy, and selection of the frontier or frontiers that
-protect reclamation belong to the composition.
+Each processing frontier has exactly one runtime publisher designated by the
+composition. A Slider normally holds that frontier's non-const reference and
+publishes it; other stages observe it through const references. `Frontier`
+itself does not enforce publisher identity. Stage topology, execution policy,
+and selection of the frontier or frontiers that protect reclamation belong to
+the composition.
 
 ## Payload Lifetime
 
