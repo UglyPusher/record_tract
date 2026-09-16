@@ -130,7 +130,10 @@ again; it never repairs, skips, or resynchronizes around corruption.
 ### Persistence Walkthrough
 
 The composition sets the persistence slider's maximum batch size and invokes
-`process_available()`. `PersistenceSlider` obtains each `RecordView`, calls
+`process_available()`. A maximum count of zero disables persistence processing:
+the call returns `SliderStatus::Empty` without append or sync even when records
+are available at `head`; zero does not mean an unlimited batch. For a non-zero
+maximum, `PersistenceSlider` obtains each selected `RecordView`, calls
 `PersistenceModule::process()`, requests one sync, and publishes the range end
 as `durable` only after success. `PersistenceModule` derives physical WAL
 sequence from its own `first_sequence` and the tape position.
