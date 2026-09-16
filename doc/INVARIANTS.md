@@ -166,15 +166,21 @@ For persistence:
 - a failed append or sync does not move `durable`;
 - retained views remain independent of durability and do not grant downstream
   permission;
-- a failed persistence module prevents further durable progress.
+- a failed persistence module prevents further durable progress for the current
+  open writer lifetime.
 
-`PersistenceModule` owns its terminal failure state; `RecordTape` remains
-unaware of it. A composition with mandatory persistence must stop production or
-otherwise preserve bounded safety after observing that failure.
+`PersistenceModule` owns its terminal failure state for the current open writer
+lifetime; `RecordTape` remains unaware of it. Closing that lifetime and later
+successfully opening a new writer lifetime clears the module failure state. A
+composition with mandatory persistence must stop production or otherwise
+preserve bounded safety after observing failure in the active lifetime.
 
 ## Post-Crash WAL Prefix
 
-- The maximal contiguous CRC-valid prefix is the authoritative recovered WAL.
+- The maximal contiguous fully validated prefix is the authoritative recovered
+  WAL. Validation includes physical identity and format, header integrity,
+  contiguous sequence, payload integrity, record boundaries, and zero padding;
+  it is not limited to CRC checks.
 - Every complete record in that prefix participates in replay and rebuild.
 - Client acknowledgement state does not change the recovered prefix.
 - Batches and the runtime `durable` frontier are not persisted as separate
