@@ -57,7 +57,9 @@ a shared contract.
 
 Persistence is a specialized tract stage, not an intrinsic property of
 `RecordTape`. `PersistenceModule` owns live append/sync and its terminal failure
-state. Its lifecycle is independent from the tape.
+state for the current open writer lifetime. Its lifecycle is independent from
+the tape; a later successful `open()` starts a new writer lifetime and clears
+the previous failure state.
 
 `PersistenceSlider` binds persistence processing to `RecordTape::head()` and a
 frontier representing durable progress. Unlike the generic per-record slider,
@@ -99,10 +101,10 @@ that truncation, and validate the complete file again. Complete invalid records,
 middle corruption, sequence errors, and identity mismatches are refused without
 mutation.
 
-After crash, the maximal contiguous CRC-valid prefix is the authoritative WAL:
-every complete record in it participates in replay and rebuild regardless of
-client acknowledgement. Batches are live append-and-sync units only. The file
-contains no batch commit records or commit markers.
+After crash, the maximal contiguous fully validated prefix is the authoritative
+WAL: every complete record in it participates in replay and rebuild regardless
+of client acknowledgement. Batches are live append-and-sync units only. The
+file contains no batch commit records or commit markers.
 
 Start with [CONTRACT.md](doc/CONTRACT.md), then see
 [DESIGN.md](doc/DESIGN.md) and [INVARIANTS.md](doc/INVARIANTS.md).
