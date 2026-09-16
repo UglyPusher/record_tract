@@ -1,36 +1,51 @@
 # record_tract
 
-`record_tract` is a C++20 library for an ordered record tract: a bounded
-`RecordTape` with slider/frontier mechanics and separately composable physical
-WAL persistence. Low-level serialization helpers are exposed under
-`<fexma/binary/...>`.
+`record_tract` is a C++20 library for a single-publisher, multi-consumer ordered
+record tract. Its core is a bounded `RecordTape` with explicit `Frontier`
+progress and statically composed `Slider<Module>` processing stages. Physical
+WAL persistence is an optional specialized stage built on the same tract.
+Low-level serialization helpers are exposed under `<fexma/binary/...>`.
 
 The exported CMake targets are:
 
 - `fexma::wal`
 - `fexma::binary`
 
-## Record Tape And Persistence
+## Core Record Tract
 
 `RecordTape` owns only:
 
 ```text
 tail <= retained positions < head
+head - tail <= capacity
 ```
 
-`RecordTape` provides producer publication, absolute-position immutable views,
-bounded reclamation, and position exhaustion handling. `PersistenceModule`
-owns live append/sync and its failure state. Their lifecycles are independent.
-`PersistenceSlider` binds that module to `head`, reads its current position from
-the durable `Frontier`, and publishes that authoritative progress only after a
-complete batch sync.
+`RecordTape` provides single-producer publication, absolute-position immutable
+views, bounded reclamation, and position exhaustion handling. It contains no
+persistence frontier, file writer, or persistence failure state.
 
-`Slider` provides synchronous stage mechanics over `RecordTape`. It reads
-either `RecordTape::head()` or an upstream `Frontier`, invokes one statically
-bound module in position order, and publishes its own `Frontier` after each
-successful record. It owns no worker, polling loop, wait strategy, or domain
-semantics. `NoOpModule` is the trivial successful stage used to prove the first
-bare composition: `head -> NoOpSlider -> tail`.
+A `Frontier` is a monotonic exclusive progress boundary. `Frontier N` certifies
+that positions `[0, N)` have completed the work represented by that frontier.
+Each processing stage publishes its own frontier.
+
+`Slider<Module>` provides synchronous stage mechanics over `RecordTape`. It
+reads either `RecordTape::head()` or an explicit upstream `Frontier`, processes
+available records in position order through one statically bound module, and
+publishes its own `Frontier` after each successful record. It owns no worker,
+polling loop, wait strategy, runtime topology, or domain semantics.
+
+The first bare composition is:
+
+```text
+producer -> RecordTape::head -> Slider<NoOpModule> -> Frontier -> reclaimer -> tail
+```
+
+More generally, multiple stages may consume directly from `head` or depend on
+explicit upstream frontiers. Stage topology, execution policy, and reclamation
+policy belong to the composition rather than to `RecordTape` or `Slider`.
+
+`NoOpModule` is the trivial always-successful module used to prove the minimal
+tract composition.
 
 RecordTape public value types live in `record_tape_types.hpp`; physical WAL
 format and lifecycle types live in `types.hpp`. RecordTape headers do not
@@ -38,23 +53,34 @@ include the physical WAL types. The current RecordTape `default_alignment` and
 physical `wal_default_alignment` are both 64 but are independent defaults, not
 a shared contract.
 
-One static `RecordTape`/persistence-slider composition can be wired as:
+## Optional WAL Persistence
+
+Persistence is a specialized tract stage, not an intrinsic property of
+`RecordTape`. `PersistenceModule` owns live append/sync and its terminal failure
+state. Its lifecycle is independent from the tape.
+
+`PersistenceSlider` binds persistence processing to `RecordTape::head()` and a
+frontier representing durable progress. Unlike the generic per-record slider,
+it appends a bounded batch, performs one OS-level physical sync, and publishes
+the durable frontier only after the complete batch has synchronized.
+
+One persistence composition can therefore be wired as:
 
 ```text
-producer -> [durable, head) -> physical sync -> [tail, durable) -> consumer
+producer -> head -> PersistenceSlider -> durable Frontier -> downstream stage
 ```
 
-That composition has three absolute frontiers:
+For that specific composition:
 
 ```text
 tail <= durable <= head
 head - tail <= capacity
 ```
 
-`RecordTape::try_publish()` writes one block and publishes `head`.
-`PersistenceSlider::process_available()` appends a bounded batch, performs one
-OS-level physical sync, and then publishes `durable`. The composition reclaims
-positions through its final mandatory downstream frontier.
+Here `durable` is the semantic name of the persistence stage's frontier, not a
+third boundary intrinsically owned by `RecordTape`. The composition reclaims
+positions only after every mandatory stage that protects retention has completed
+them and all borrowed views have been retired.
 
 `open()` creates only a new WAL file and never truncates an existing path. The
 physical file uses canonical little-endian headers and aligned record offsets.
@@ -80,8 +106,8 @@ contains no batch commit records or commit markers.
 
 Start with [CONTRACT.md](doc/CONTRACT.md), then see
 [DESIGN.md](doc/DESIGN.md) and [INVARIANTS.md](doc/INVARIANTS.md).
-The physical layout is in [FILE_FORMAT.md](doc/FILE_FORMAT.md); build and test
-commands are in [BUILDING.md](doc/BUILDING.md).
+The physical WAL layout is in [FILE_FORMAT.md](doc/FILE_FORMAT.md); build and
+test commands are in [BUILDING.md](doc/BUILDING.md).
 
 ## Build And Test
 
