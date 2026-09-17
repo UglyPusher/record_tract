@@ -60,7 +60,7 @@ using Payload = std::array<std::byte, 16>;
   constexpr WalConfig expected{16, 7, 64, 23, StreamKind::Command,
                                41, 43, 101, 47};
   RecordTape tape;
-  PersistenceModule persistence;
+  Persistence persistence(tape, PersistencePolicy{3});
   if (!tape.open({expected.payload_size, expected.capacity,
                   expected.alignment})
            .ok() ||
@@ -75,10 +75,9 @@ using Payload = std::array<std::byte, 16>;
 
   for (Position position = 0; position < 3; ++position) {
     if (!tape.try_publish(payload(position)).ok()) return false;
-    const AccessResult access = tape.try_view(position);
-    if (!access.ok() || !persistence.append(access.record)) return false;
   }
-  if (!persistence.sync() || !persistence.close() || persistence.failed()) {
+  if (persistence.process_available().status != SliderStatus::Processed ||
+      !persistence.close() || persistence.failed()) {
     return false;
   }
 

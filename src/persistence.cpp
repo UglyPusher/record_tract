@@ -1,6 +1,6 @@
 /**
  * @file persistence.cpp
- * @brief Live physical persistence module implementation.
+ * @brief Persistence mechanism over a RecordTape implementation.
  */
 
 #include <fexma/wal/format.hpp>
@@ -13,12 +13,13 @@
 
 namespace fexma::wal {
 
-PersistenceModule::PersistenceModule() = default;
+Persistence::Persistence(const RecordTape& source, PersistencePolicy policy) noexcept
+    : source_(source), policy_(policy.sync_count == 0 ? PersistencePolicy{} : policy) {}
 
-PersistenceModule::~PersistenceModule() { (void)close(); }
+Persistence::~Persistence() { (void)close(); }
 
-OpenResult PersistenceModule::open(const std::filesystem::path& path,
-                                   const PhysicalWalConfig& config) noexcept {
+OpenResult Persistence::open(const std::filesystem::path& path,
+                             const PhysicalWalConfig& config) noexcept {
   if (is_open()) return {OpenStatus::AlreadyOpen};
   const WalConfig adapter_config{
       config.payload_size, 1, config.alignment, config.payload_schema_version,
@@ -38,11 +39,7 @@ OpenResult PersistenceModule::open(const std::filesystem::path& path,
   return {OpenStatus::Ok};
 }
 
-bool PersistenceModule::process(const RecordView& record) noexcept {
-  return append(record);
-}
-
-bool PersistenceModule::append(const RecordView& record) noexcept {
+bool Persistence::append(const RecordView& record) noexcept {
   if (!is_open() || failed_.load(std::memory_order_acquire) ||
       record.position > std::numeric_limits<std::uint64_t>::max() -
                             first_sequence_ ||
@@ -54,7 +51,7 @@ bool PersistenceModule::append(const RecordView& record) noexcept {
   return true;
 }
 
-bool PersistenceModule::sync() noexcept {
+bool Persistence::sync() noexcept {
   if (!is_open() || failed_.load(std::memory_order_acquire) ||
       !physical_wal_->sync()) {
     failed_.store(true, std::memory_order_release);
@@ -63,19 +60,67 @@ bool PersistenceModule::sync() noexcept {
   return true;
 }
 
-bool PersistenceModule::close() noexcept {
+bool Persistence::close() noexcept {
   if (!physical_wal_) return true;
   const bool closed = physical_wal_->close();
   physical_wal_.reset();
   return closed;
 }
 
-bool PersistenceModule::is_open() const noexcept {
+bool Persistence::is_open() const noexcept {
   return physical_wal_ && physical_wal_->is_open();
 }
 
-bool PersistenceModule::failed() const noexcept {
+bool Persistence::failed() const noexcept {
   return failed_.load(std::memory_order_acquire);
+}
+
+SliderResult Persistence::process_available() noexcept {
+  Position current = GetFrontier();
+  const Position available_end = source_.head();
+  if (available_end < current) {
+    return {SliderStatus::UpstreamRegression, current, 0};
+  }
+  if (available_end == current) {
+    return {SliderStatus::Empty, current, 0};
+  }
+
+  const Position available_count = available_end - current;
+  const Position count = available_count < policy_.sync_count
+                             ? available_count
+                             : policy_.sync_count;
+  const Position batch_end = current + count;
+  std::uint64_t processed_count = 0;
+  while (current < batch_end) {
+    const AccessResult access = source_.try_view(current);
+    if (!access.ok()) {
+      return {SliderStatus::ViewUnavailable, current, processed_count,
+              access.status};
+    }
+    if (!append(access.record)) {
+      return {SliderStatus::ModuleFailed, current, processed_count};
+    }
+    ++current;
+    ++processed_count;
+  }
+
+  if (!sync()) {
+    return {SliderStatus::ModuleFailed, current, processed_count};
+  }
+  publish(current);
+  return {SliderStatus::Processed, current, processed_count};
+}
+
+Position Persistence::GetFrontier() const noexcept {
+  return frontier_.load(std::memory_order_acquire);
+}
+
+void Persistence::reset_quiescent(Position initial) noexcept {
+  frontier_.store(initial, std::memory_order_relaxed);
+}
+
+void Persistence::publish(Position end) noexcept {
+  frontier_.store(end, std::memory_order_release);
 }
 
 } // namespace fexma::wal

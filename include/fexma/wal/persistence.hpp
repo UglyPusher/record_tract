@@ -2,10 +2,12 @@
 
 /**
  * @file persistence.hpp
- * @brief Live physical persistence module without progress ownership.
+ * @brief Persistence mechanism over a RecordTape.
  */
 
 #include <fexma/wal/record_tape_types.hpp>
+#include <fexma/wal/record_tape.hpp>
+#include <fexma/wal/slider.hpp>
 #include <fexma/wal/types.hpp>
 
 #include <atomic>
@@ -29,29 +31,43 @@ struct PhysicalWalConfig {
   ManifestId manifest_id{};
 };
 
-class PersistenceModule final {
-public:
-  PersistenceModule();
-  ~PersistenceModule();
+struct PersistencePolicy final {
+  std::size_t sync_count{1};
+};
 
-  PersistenceModule(const PersistenceModule&) = delete;
-  PersistenceModule& operator=(const PersistenceModule&) = delete;
-  PersistenceModule(PersistenceModule&&) = delete;
-  PersistenceModule& operator=(PersistenceModule&&) = delete;
+class Persistence final {
+public:
+  explicit Persistence(const RecordTape& source,
+                       PersistencePolicy policy = {}) noexcept;
+  ~Persistence();
+
+  Persistence(const Persistence&) = delete;
+  Persistence& operator=(const Persistence&) = delete;
+  Persistence(Persistence&&) = delete;
+  Persistence& operator=(Persistence&&) = delete;
 
   [[nodiscard]] OpenResult open(const std::filesystem::path& path,
                                 const PhysicalWalConfig& config) noexcept;
-  [[nodiscard]] bool process(const RecordView& record) noexcept;
-  [[nodiscard]] bool append(const RecordView& record) noexcept;
-  [[nodiscard]] bool sync() noexcept;
   [[nodiscard]] bool close() noexcept;
   [[nodiscard]] bool is_open() const noexcept;
   [[nodiscard]] bool failed() const noexcept;
 
+  [[nodiscard]] SliderResult process_available() noexcept;
+  [[nodiscard]] Position GetFrontier() const noexcept;
+  [[nodiscard]] Position current() const noexcept { return GetFrontier(); }
+  void reset_quiescent(Position initial) noexcept;
+
 private:
+  [[nodiscard]] bool append(const RecordView& record) noexcept;
+  [[nodiscard]] bool sync() noexcept;
+  void publish(Position end) noexcept;
+
+  const RecordTape& source_;
   std::unique_ptr<detail::PhysicalWalAdapter> physical_wal_{};
   std::uint64_t first_sequence_{};
   std::atomic<bool> failed_{false};
+  const PersistencePolicy policy_;
+  alignas(64) std::atomic<Position> frontier_{};
 };
 
 } // namespace fexma::wal

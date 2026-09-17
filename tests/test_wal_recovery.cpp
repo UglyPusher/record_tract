@@ -54,7 +54,13 @@ payload(std::uint64_t value) noexcept {
 [[nodiscard]] bool create_wal(const std::filesystem::path& path,
                               std::uint32_t records) {
   std::filesystem::remove(path);
-  PersistenceModule persistence;
+  RecordTape tape;
+  Persistence persistence(tape, PersistencePolicy{records == 0 ? 1u : records});
+  if (!tape.open({config.payload_size, records == 0 ? 1u : records,
+                  config.alignment})
+           .ok()) {
+    return false;
+  }
   const PhysicalWalConfig physical_config{
       config.payload_size,           config.alignment,
       config.payload_schema_version, config.stream_kind,
@@ -65,12 +71,14 @@ payload(std::uint64_t value) noexcept {
   }
   for (std::uint32_t index = 0; index < records; ++index) {
     const auto bytes = payload(index + 1u);
-    const RecordView record{index, bytes};
-    if (!persistence.append(record)) {
+    if (!tape.try_publish(bytes).ok()) {
       return false;
     }
   }
-  return persistence.sync() && persistence.close();
+  const SliderResult processed = persistence.process_available();
+  return (records == 0 ? processed.status == SliderStatus::Empty
+                       : processed.status == SliderStatus::Processed) &&
+         persistence.close();
 }
 
 [[nodiscard]] std::vector<std::byte>

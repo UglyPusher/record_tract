@@ -4,7 +4,7 @@
  */
 
 #include <fexma/wal/noop_module.hpp>
-#include <fexma/wal/persistence_slider.hpp>
+#include <fexma/wal/persistence.hpp>
 #include <fexma/wal/reader.hpp>
 
 #include "physical_wal_file.hpp"
@@ -74,7 +74,7 @@ constexpr PhysicalWalConfig physical_config{
     wal_config.stream_id,              wal_config.epoch_id,
     wal_config.first_sequence,         wal_config.manifest_id};
 
-[[nodiscard]] bool open(RecordTape& tape, PersistenceModule& persistence,
+[[nodiscard]] bool open(RecordTape& tape, Persistence& persistence,
                         const std::filesystem::path& path) {
   return tape.open({wal_config.payload_size, wal_config.capacity,
                    wal_config.alignment})
@@ -92,26 +92,19 @@ constexpr PhysicalWalConfig physical_config{
   std::filesystem::remove(path);
 
   RecordTape tape;
-  PersistenceModule persistence;
+  Persistence persistence(tape, PersistencePolicy{2});
   if (!open(tape, persistence, path)) return false;
   for (std::uint64_t value = 0; value < 5; ++value) {
     if (!publish(tape, value)) return false;
   }
 
-  PersistenceSlider persistence_slider(tape, persistence);
+  Persistence& persistence_slider = persistence;
   NoOpModule no_op;
   Slider no_op_slider(tape, persistence_slider, no_op);
 
   detail::PhysicalWalFileTestControl control{};
   PhysicalControlGuard guard(control);
 
-  if (persistence_slider.process_available().status != SliderStatus::Empty ||
-      control.append_calls != 0 || control.sync_calls != 0 ||
-      no_op_slider.process_available().status != SliderStatus::Empty) {
-    return false;
-  }
-
-  persistence_slider.set_maximum_count(2);
   const SliderResult first = persistence_slider.process_available();
   if (!first.ok() || first.processed_count != 2 ||
       persistence_slider.GetFrontier() != 2 || control.append_calls != 2 ||
@@ -130,7 +123,6 @@ constexpr PhysicalWalConfig physical_config{
     return false;
   }
 
-  persistence_slider.set_maximum_count(8);
   const SliderResult third = persistence_slider.process_available();
   const SliderResult empty = persistence_slider.process_available();
   if (!third.ok() || third.processed_count != 1 ||
@@ -166,16 +158,75 @@ constexpr PhysicalWalConfig physical_config{
   return valid;
 }
 
+[[nodiscard]] bool strict_default_policy_processes_one(PersistencePolicy policy,
+                                                       const char* name) {
+  const auto path = test_path(name);
+  std::filesystem::remove(path);
+  RecordTape tape;
+  Persistence persistence(tape, policy);
+  if (!open(tape, persistence, path) || !publish(tape, 0) ||
+      !publish(tape, 1)) {
+    return false;
+  }
+  detail::PhysicalWalFileTestControl control{};
+  bool valid = false;
+  {
+    PhysicalControlGuard guard(control);
+    const SliderResult first = persistence.process_available();
+    const SliderResult second = persistence.process_available();
+    valid = first.status == SliderStatus::Processed &&
+            first.processed_count == 1 && persistence.GetFrontier() == 2 &&
+            second.status == SliderStatus::Processed &&
+            second.processed_count == 1 && control.sync_calls == 2;
+  }
+  valid = valid && persistence.close();
+  tape.close();
+  std::filesystem::remove(path);
+  return valid;
+}
+
+[[nodiscard]] bool sync_policy_eight_drains_twenty_three() {
+  const auto path = test_path("fexma_wal_persistence_policy_eight.wal");
+  std::filesystem::remove(path);
+  RecordTape tape;
+  Persistence persistence(tape, PersistencePolicy{8});
+  if (!tape.open({wal_config.payload_size, 32, wal_config.alignment}).ok() ||
+      !persistence.open(path, physical_config).ok()) {
+    return false;
+  }
+  for (std::uint64_t value = 0; value < 23; ++value) {
+    if (!publish(tape, value)) return false;
+  }
+  const SliderResult first = persistence.process_available();
+  const Position first_frontier = persistence.GetFrontier();
+  const SliderResult second = persistence.process_available();
+  const Position second_frontier = persistence.GetFrontier();
+  const SliderResult third = persistence.process_available();
+  const Position third_frontier = persistence.GetFrontier();
+  const SliderResult empty = persistence.process_available();
+  const bool valid = first.status == SliderStatus::Processed &&
+                     first.processed_count == 8 && first_frontier == 8 &&
+                     second.status == SliderStatus::Processed &&
+                     second.processed_count == 8 && second_frontier == 16 &&
+                     third.status == SliderStatus::Processed &&
+                     third.processed_count == 7 && third_frontier == 23 &&
+                     empty.status == SliderStatus::Empty;
+  (void)persistence.close();
+  tape.close();
+  std::filesystem::remove(path);
+  return valid;
+}
+
 [[nodiscard]] bool append_failure_does_not_publish() {
   const auto path = test_path("fexma_wal_persistence_slider_append_fail.wal");
   std::filesystem::remove(path);
 
   RecordTape tape;
-  PersistenceModule persistence;
+  Persistence persistence(tape, PersistencePolicy{2});
   if (!open(tape, persistence, path) || !publish(tape, 0) || !publish(tape, 1)) {
     return false;
   }
-  PersistenceSlider slider(tape, persistence, 2);
+  Persistence& slider = persistence;
 
   detail::PhysicalWalFileTestControl control{};
   control.fail_append_call = 0;
@@ -196,10 +247,10 @@ constexpr PhysicalWalConfig physical_config{
   std::filesystem::remove(path);
 
   RecordTape tape;
-  PersistenceModule persistence;
+  Persistence persistence(tape, PersistencePolicy{2});
   if (!open(tape, persistence, path) || !publish(tape, 0)) return false;
 
-  PersistenceSlider persistence_slider(tape, persistence, 1);
+  Persistence& persistence_slider = persistence;
   NoOpModule no_op;
   Slider no_op_slider(tape, persistence_slider, no_op);
 
@@ -212,7 +263,6 @@ constexpr PhysicalWalConfig physical_config{
     return false;
   }
 
-  persistence_slider.set_maximum_count(2);
   detail::PhysicalWalFileTestControl failure_control{};
   failure_control.fail_sync_call = 0;
   SliderResult failed{};
@@ -244,8 +294,15 @@ constexpr PhysicalWalConfig physical_config{
 } // namespace
 
 int main() {
-  if (!batches_sync_then_release_downstream()) return 1;
-  if (!append_failure_does_not_publish()) return 2;
-  if (!sync_failure_hides_batch_but_durable_prefix_drains()) return 3;
+  if (!strict_default_policy_processes_one(PersistencePolicy{},
+                                           "fexma_wal_persistence_default.wal"))
+    return 1;
+  if (!strict_default_policy_processes_one(
+          PersistencePolicy{0}, "fexma_wal_persistence_zero.wal"))
+    return 2;
+  if (!sync_policy_eight_drains_twenty_three()) return 3;
+  if (!batches_sync_then_release_downstream()) return 4;
+  if (!append_failure_does_not_publish()) return 5;
+  if (!sync_failure_hides_batch_but_durable_prefix_drains()) return 6;
   return 0;
 }
