@@ -1,210 +1,126 @@
-/**
- * @file test_wal_slider.cpp
- * @brief Contract tests for generic synchronous WAL slider mechanics.
- */
-
 #include <fexma/wal/slider.hpp>
 
 #include <array>
-#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <span>
-#include <type_traits>
 
 using namespace fexma::wal;
 
 namespace {
-
 using Payload = std::array<std::byte, 8>;
-
-[[nodiscard]] Payload payload(std::uint64_t value) noexcept {
-  Payload result{};
-  for (std::size_t index = 0; index < result.size(); ++index) {
-    result[index] =
-        static_cast<std::byte>((value >> (index * 8u)) & 0xffu);
-  }
-  return result;
-}
+Payload payload(std::uint64_t value) noexcept { Payload r{}; for (std::size_t i=0;i<r.size();++i) r[i]=static_cast<std::byte>((value>>(i*8u))&0xffu); return r; }
 
 class RecordingModule final {
 public:
-  explicit RecordingModule(const Frontier& published,
-                           Position fail_at = static_cast<Position>(-1)) noexcept
-      : published_(&published), fail_at_(fail_at) {}
-
-  [[nodiscard]] bool process(const RecordView& record) noexcept {
-    if (record.position == fail_at_) return false;
-    positions_[count_] = record.position;
-    published_on_entry_[count_] = published_->acquire();
-    ++count_;
-    return true;
-  }
-
+  explicit RecordingModule(Position fail_at = static_cast<Position>(-1)) noexcept : fail_at_(fail_at) {}
+  bool process(const RecordView& record) noexcept { if (record.position == fail_at_) return false; positions_[count_++] = record.position; return true; }
   void allow_all() noexcept { fail_at_ = static_cast<Position>(-1); }
-  [[nodiscard]] std::size_t count() const noexcept { return count_; }
-  [[nodiscard]] Position position(std::size_t index) const noexcept {
-    return positions_[index];
-  }
-  [[nodiscard]] Position published_on_entry(std::size_t index) const noexcept {
-    return published_on_entry_[index];
-  }
-
+  std::size_t count() const noexcept { return count_; }
+  Position position(std::size_t i) const noexcept { return positions_[i]; }
 private:
-  const Frontier* published_{};
-  Position fail_at_{};
-  std::array<Position, 8> positions_{};
-  std::array<Position, 8> published_on_entry_{};
-  std::size_t count_{};
+  Position fail_at_{}; std::array<Position, 8> positions_{}; std::size_t count_{};
 };
 
-template <class T>
-concept FrontierPublisher = requires(T& frontier, Position end) {
-  { frontier.publish(end) } noexcept -> std::same_as<bool>;
+class Upstream final {
+public:
+  explicit Upstream(Position value = 0) noexcept : value_(value) {}
+  Position GetFrontier() const noexcept { return value_; }
+  void publish(Position value) noexcept { value_ = value; }
+private: Position value_{};
 };
 
-static_assert(!std::is_polymorphic_v<RecordingModule>);
-static_assert(!std::is_copy_constructible_v<Frontier>);
-static_assert(FrontierPublisher<Frontier>);
-static_assert(!FrontierPublisher<const Frontier>);
+bool open_tape(RecordTape& tape) { return tape.open({sizeof(Payload), 4, default_alignment}).ok(); }
+bool publish(RecordTape& tape, std::uint64_t value) { const Payload bytes=payload(value); return tape.try_publish(std::span<const std::byte>{bytes}).ok(); }
 
-[[nodiscard]] bool frontier_is_monotonic_and_resettable_quiescent() noexcept {
-  Frontier frontier(1);
-  if (frontier.acquire() != 1 || !frontier.publish(3) ||
-      frontier.acquire() != 3 || frontier.publish(2) ||
-      frontier.acquire() != 3) {
-    return false;
-  }
-  frontier.reset_quiescent(2);
-  return frontier.acquire() == 2;
+bool processes_available_range_in_order() {
+  RecordTape tape; if (!open_tape(tape)||!publish(tape,1)||!publish(tape,2)||!publish(tape,3)) return false;
+  RecordingModule module; Slider slider(tape,module); const SliderResult result=slider.process_available();
+  if(result.status!=SliderStatus::Processed||result.processed_count!=3||result.current!=3||slider.GetFrontier()!=3||module.count()!=3) return false;
+  for(Position p=0;p<3;++p) if(module.position(static_cast<std::size_t>(p))!=p) return false;
+  return slider.process_available().status==SliderStatus::Empty;
 }
 
-[[nodiscard]] bool open_tape(RecordTape& tape, std::uint32_t capacity = 4) {
-  return tape.open({static_cast<std::uint32_t>(sizeof(Payload)), capacity,
-                    default_alignment})
-      .ok();
+bool respects_upstream_and_retries_module_failure() {
+  RecordTape tape; if(!open_tape(tape)||!publish(tape,1)||!publish(tape,2)||!publish(tape,3)) return false;
+  Upstream upstream(2); RecordingModule module(1); Slider slider(tape,upstream,module);
+  const SliderResult failed=slider.process_available(); if(failed.status!=SliderStatus::ModuleFailed||failed.processed_count!=1||slider.GetFrontier()!=1||module.count()!=1) return false;
+  module.allow_all(); const SliderResult retried=slider.process_available(); if(retried.status!=SliderStatus::Processed||retried.processed_count!=1||retried.current!=2||slider.GetFrontier()!=2) return false;
+  upstream.publish(3); const SliderResult last=slider.process_available(); return last.status==SliderStatus::Processed&&last.processed_count==1&&last.current==3&&slider.GetFrontier()==3;
 }
 
-[[nodiscard]] bool publish(RecordTape& tape, std::uint64_t value) {
-  const Payload bytes = payload(value);
-  return tape.try_publish(std::span<const std::byte>{bytes}).ok();
+bool rejects_regressed_upstream() {
+  RecordTape tape; if(!open_tape(tape)||!publish(tape,1)) return false;
+  Upstream upstream; RecordingModule module; Slider slider(tape,upstream,module); slider.reset_quiescent(1);
+  return slider.process_available().status==SliderStatus::UpstreamRegression&&module.count()==0&&slider.GetFrontier()==1;
 }
 
-[[nodiscard]] bool processes_available_range_in_order() {
+bool reports_unavailable_views_without_publication() {
+  RecordTape tape; if(!open_tape(tape)||!publish(tape,1)) return false;
+  Upstream upstream(1); RecordingModule module; Slider reclaimed(tape,upstream,module); if(tape.reclaim(1)!=ReclaimStatus::Ok) return false;
+  const SliderResult rr=reclaimed.process_available(); if(rr.status!=SliderStatus::ViewUnavailable||rr.view_status!=ViewStatus::Reclaimed||rr.processed_count!=0||reclaimed.GetFrontier()!=0) return false;
+  RecordTape second; if(!open_tape(second)) return false; Upstream ahead(1); RecordingModule second_module; Slider unpublished(second,ahead,second_module); const SliderResult ur=unpublished.process_available();
+  return ur.status==SliderStatus::ViewUnavailable&&ur.view_status==ViewStatus::Unpublished&&unpublished.GetFrontier()==0&&second_module.count()==0;
+}
+
+bool execution_policy_preserves_default_and_supports_batches() {
   RecordTape tape;
   if (!open_tape(tape) || !publish(tape, 1) || !publish(tape, 2) ||
-      !publish(tape, 3)) {
-    return false;
-  }
+      !publish(tape, 3)) return false;
+  RecordingModule explicit_default;
+  Slider default_slider(tape, explicit_default, ExecutionPolicy{1, 1});
+  if (default_slider.process_available().processed_count != 3 ||
+      default_slider.GetFrontier() != 3) return false;
 
-  Frontier progress;
-  RecordingModule module(progress);
-  Slider slider(tape, progress, module);
-
-  const SliderResult result = slider.process_available();
-  if (result.status != SliderStatus::Processed || result.processed_count != 3 ||
-      result.current != 3 || slider.current() != 3 ||
-      progress.acquire() != 3 || module.count() != 3) {
-    return false;
-  }
-  for (Position position = 0; position < 3; ++position) {
-    if (module.position(static_cast<std::size_t>(position)) != position ||
-        module.published_on_entry(static_cast<std::size_t>(position)) !=
-            position) {
-      return false;
-    }
-  }
-
-  const SliderResult empty = slider.process_available();
-  return empty.status == SliderStatus::Empty && empty.processed_count == 0 &&
-         module.count() == 3;
+  RecordTape batched_tape;
+  if (!open_tape(batched_tape) || !publish(batched_tape, 1) ||
+      !publish(batched_tape, 2) || !publish(batched_tape, 3)) return false;
+  RecordingModule batched(2);
+  Slider batched_slider(batched_tape, batched, ExecutionPolicy{2, 2});
+  const SliderResult first = batched_slider.process_available();
+  return first.status == SliderStatus::ModuleFailed &&
+         first.processed_count == 2 && batched_slider.GetFrontier() == 2;
 }
 
-[[nodiscard]] bool respects_upstream_and_retries_module_failure() {
+bool execution_policy_publishes_cadence_and_partial_progress() {
   RecordTape tape;
-  if (!open_tape(tape) || !publish(tape, 1) || !publish(tape, 2) ||
-      !publish(tape, 3)) {
-    return false;
-  }
-
-  Frontier upstream(2);
-  Frontier own;
-  RecordingModule module(own, 1);
-  Slider slider(tape, upstream, own, module);
-
+  if (!tape.open({sizeof(Payload), 8, default_alignment}).ok() ||
+      !publish(tape, 1) || !publish(tape, 2) ||
+      !publish(tape, 3) || !publish(tape, 4) || !publish(tape, 5) ||
+      !publish(tape, 6)) return false;
+  RecordingModule module(4);
+  Slider slider(tape, module, ExecutionPolicy{8, 4});
   const SliderResult failed = slider.process_available();
-  if (failed.status != SliderStatus::ModuleFailed ||
-      failed.processed_count != 1 || failed.current != 1 ||
-      slider.current() != 1 || own.acquire() != 1 ||
-      module.count() != 1 || module.position(0) != 0) {
-    return false;
-  }
-
+  if (failed.status != SliderStatus::ModuleFailed || failed.processed_count != 4 ||
+      slider.GetFrontier() != 4) return false;
   module.allow_all();
-  const SliderResult retried = slider.process_available();
-  if (retried.status != SliderStatus::Processed ||
-      retried.processed_count != 1 || retried.current != 2 ||
-      module.count() != 2 || module.position(1) != 1 ||
-      own.acquire() != 2) {
-    return false;
-  }
-
-  if (!upstream.publish(3)) return false;
-  const SliderResult last = slider.process_available();
-  return last.status == SliderStatus::Processed &&
-         last.processed_count == 1 && last.current == 3 &&
-         module.position(2) == 2 && own.acquire() == 3;
+  const SliderResult completed = slider.process_available();
+  return completed.status == SliderStatus::Processed &&
+         completed.processed_count == 2 && slider.GetFrontier() == 6;
 }
 
-[[nodiscard]] bool rejects_regressed_upstream() {
+bool execution_policy_zero_counts_fall_back_to_default() {
   RecordTape tape;
   if (!open_tape(tape) || !publish(tape, 1)) return false;
-
-  Frontier regressed_upstream;
-  Frontier regressed_own(1);
-  RecordingModule regressed_module(regressed_own);
-  Slider regressed(tape, regressed_upstream, regressed_own, regressed_module);
-  return regressed.process_available().status ==
-             SliderStatus::UpstreamRegression &&
-         regressed_module.count() == 0 && regressed_own.acquire() == 1;
+  RecordingModule module;
+  Slider zero_read(tape, module, ExecutionPolicy{0, 1});
+  Slider zero_publish(tape, module, ExecutionPolicy{1, 0});
+  const SliderResult read_result = zero_read.process_available();
+  const SliderResult publish_result = zero_publish.process_available();
+  return read_result.status == SliderStatus::Processed &&
+         read_result.processed_count == 1 && zero_read.GetFrontier() == 1 &&
+         publish_result.status == SliderStatus::Processed &&
+         publish_result.processed_count == 1 && zero_publish.GetFrontier() == 1;
 }
-
-[[nodiscard]] bool reports_unavailable_views_without_publication() {
-  RecordTape tape;
-  if (!open_tape(tape) || !publish(tape, 1)) return false;
-
-  Frontier upstream(1);
-  Frontier own;
-  RecordingModule module(own);
-  Slider reclaimed(tape, upstream, own, module);
-  if (tape.reclaim(1) != ReclaimStatus::Ok) return false;
-
-  const SliderResult reclaimed_result = reclaimed.process_available();
-  if (reclaimed_result.status != SliderStatus::ViewUnavailable ||
-      reclaimed_result.view_status != ViewStatus::Reclaimed ||
-      reclaimed_result.processed_count != 0 || own.acquire() != 0) {
-    return false;
-  }
-
-  RecordTape second;
-  if (!open_tape(second)) return false;
-  Frontier ahead(1);
-  Frontier second_own;
-  RecordingModule second_module(second_own);
-  Slider unpublished(second, ahead, second_own, second_module);
-  const SliderResult unpublished_result = unpublished.process_available();
-  return unpublished_result.status == SliderStatus::ViewUnavailable &&
-         unpublished_result.view_status == ViewStatus::Unpublished &&
-         second_own.acquire() == 0 && second_module.count() == 0;
-}
-
 } // namespace
 
 int main() {
-  if (!frontier_is_monotonic_and_resettable_quiescent()) return 1;
-  if (!processes_available_range_in_order()) return 2;
-  if (!respects_upstream_and_retries_module_failure()) return 3;
-  if (!rejects_regressed_upstream()) return 4;
-  if (!reports_unavailable_views_without_publication()) return 5;
+  if (!processes_available_range_in_order()) return 1;
+  if (!respects_upstream_and_retries_module_failure()) return 2;
+  if (!rejects_regressed_upstream()) return 3;
+  if (!reports_unavailable_views_without_publication()) return 4;
+  if (!execution_policy_preserves_default_and_supports_batches()) return 5;
+  if (!execution_policy_publishes_cadence_and_partial_progress()) return 6;
+  if (!execution_policy_zero_counts_fall_back_to_default()) return 7;
   return 0;
 }

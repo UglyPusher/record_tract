@@ -66,31 +66,30 @@ using Payload = std::array<std::byte, 16>;
     return false;
   }
 
-  Frontier no_op_frontier;
   NoOpModule module;
-  Slider slider(tape, no_op_frontier, module);
+  Slider slider(tape, module);
 
   const SliderResult processed = slider.process_available();
   if (processed.status != SliderStatus::Processed ||
       processed.processed_count != capacity ||
-      no_op_frontier.acquire() != capacity || tape.tail() != 0 ||
+      slider.GetFrontier() != capacity || tape.tail() != 0 ||
       tape.try_publish(std::span<const std::byte>{blocked_payload}).status !=
           PublishStatus::Full) {
     return false;
   }
 
-  if (tape.reclaim(no_op_frontier.acquire()) != ReclaimStatus::Ok ||
+  if (tape.reclaim(slider.GetFrontier()) != ReclaimStatus::Ok ||
       !publish(tape, capacity)) {
     return false;
   }
   const SliderResult wrapped = slider.process_available();
   if (!wrapped.ok() || wrapped.current != capacity + 1 ||
-      tape.reclaim(no_op_frontier.acquire()) != ReclaimStatus::Ok) {
+      tape.reclaim(slider.GetFrontier()) != ReclaimStatus::Ok) {
     return false;
   }
 
   return tape.tail() == capacity + 1 &&
-         no_op_frontier.acquire() == tape.tail() &&
+         slider.GetFrontier() == tape.tail() &&
          tape.head() == tape.tail();
 }
 
@@ -107,9 +106,8 @@ using Payload = std::array<std::byte, 16>;
   if (!before.ok() || !equal(before.record.payload, payload(0))) return false;
   const std::byte* const first_address = before.record.payload.data();
 
-  Frontier no_op_frontier;
   NoOpModule module;
-  Slider slider(tape, no_op_frontier, module);
+  Slider slider(tape, module);
   if (!slider.process_available().ok()) return false;
 
   const AccessResult retained = tape.try_view(0);
@@ -133,8 +131,8 @@ using Payload = std::array<std::byte, 16>;
   }
 
   if (!slider.process_available().ok() ||
-      no_op_frontier.acquire() != 3 ||
-      tape.reclaim(no_op_frontier.acquire()) != ReclaimStatus::Ok) {
+      slider.GetFrontier() != 3 ||
+      tape.reclaim(slider.GetFrontier()) != ReclaimStatus::Ok) {
     return false;
   }
   return tape.tail() == 3 && tape.head() == 3;
@@ -172,9 +170,8 @@ private:
     return false;
   }
 
-  Frontier no_op_frontier;
   OrderedProbeModule module;
-  Slider slider(tape, no_op_frontier, module);
+  Slider slider(tape, module);
   std::atomic<bool> failed{false};
   std::atomic<bool> producer_done{false};
 
@@ -205,7 +202,7 @@ private:
       if (failed.load(std::memory_order_acquire)) return;
       const SliderResult result = slider.process_available();
       if (result.status == SliderStatus::Processed) {
-        const Position published = no_op_frontier.acquire();
+        const Position published = slider.GetFrontier();
         if (published != slider.current() || published > tape.head() ||
             tape.reclaim(published) != ReclaimStatus::Ok) {
           failed.store(true, std::memory_order_release);
@@ -230,7 +227,7 @@ private:
 
   return !failed.load(std::memory_order_acquire) && module.valid() &&
          module.count() == message_count && tape.tail() == message_count &&
-         no_op_frontier.acquire() == message_count &&
+      slider.GetFrontier() == message_count &&
          tape.head() == message_count;
 }
 

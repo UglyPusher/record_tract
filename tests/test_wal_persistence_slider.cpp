@@ -98,11 +98,9 @@ constexpr PhysicalWalConfig physical_config{
     if (!publish(tape, value)) return false;
   }
 
-  Frontier durable;
-  PersistenceSlider persistence_slider(tape, durable, persistence);
-  Frontier no_op_frontier;
+  PersistenceSlider persistence_slider(tape, persistence);
   NoOpModule no_op;
-  Slider no_op_slider(tape, durable, no_op_frontier, no_op);
+  Slider no_op_slider(tape, persistence_slider, no_op);
 
   detail::PhysicalWalFileTestControl control{};
   PhysicalControlGuard guard(control);
@@ -116,19 +114,19 @@ constexpr PhysicalWalConfig physical_config{
   persistence_slider.set_maximum_count(2);
   const SliderResult first = persistence_slider.process_available();
   if (!first.ok() || first.processed_count != 2 ||
-      durable.acquire() != 2 || control.append_calls != 2 ||
+      persistence_slider.GetFrontier() != 2 || control.append_calls != 2 ||
       control.sync_calls != 1 || !no_op_slider.process_available().ok() ||
-      no_op_frontier.acquire() != 2 ||
-      tape.reclaim(no_op_frontier.acquire()) != ReclaimStatus::Ok) {
+      no_op_slider.GetFrontier() != 2 ||
+      tape.reclaim(no_op_slider.GetFrontier()) != ReclaimStatus::Ok) {
     return false;
   }
 
   const SliderResult second = persistence_slider.process_available();
   if (!second.ok() || second.processed_count != 2 ||
-      durable.acquire() != 4 || control.append_calls != 4 ||
+      persistence_slider.GetFrontier() != 4 || control.append_calls != 4 ||
       control.sync_calls != 2 || !no_op_slider.process_available().ok() ||
-      no_op_frontier.acquire() != 4 ||
-      tape.reclaim(no_op_frontier.acquire()) != ReclaimStatus::Ok) {
+      no_op_slider.GetFrontier() != 4 ||
+      tape.reclaim(no_op_slider.GetFrontier()) != ReclaimStatus::Ok) {
     return false;
   }
 
@@ -136,11 +134,11 @@ constexpr PhysicalWalConfig physical_config{
   const SliderResult third = persistence_slider.process_available();
   const SliderResult empty = persistence_slider.process_available();
   if (!third.ok() || third.processed_count != 1 ||
-      empty.status != SliderStatus::Empty || durable.acquire() != 5 ||
+      empty.status != SliderStatus::Empty || persistence_slider.GetFrontier() != 5 ||
       control.append_calls != 5 || control.sync_calls != 3 ||
       !no_op_slider.process_available().ok() ||
-      no_op_frontier.acquire() != 5 ||
-      tape.reclaim(no_op_frontier.acquire()) != ReclaimStatus::Ok ||
+      no_op_slider.GetFrontier() != 5 ||
+      tape.reclaim(no_op_slider.GetFrontier()) != ReclaimStatus::Ok ||
       tape.tail() != 5 || tape.head() != 5) {
     return false;
   }
@@ -177,8 +175,7 @@ constexpr PhysicalWalConfig physical_config{
   if (!open(tape, persistence, path) || !publish(tape, 0) || !publish(tape, 1)) {
     return false;
   }
-  Frontier durable;
-  PersistenceSlider slider(tape, durable, persistence, 2);
+  PersistenceSlider slider(tape, persistence, 2);
 
   detail::PhysicalWalFileTestControl control{};
   control.fail_append_call = 0;
@@ -186,7 +183,7 @@ constexpr PhysicalWalConfig physical_config{
   const SliderResult failed = slider.process_available();
   const bool valid = failed.status == SliderStatus::ModuleFailed &&
                      failed.processed_count == 0 && slider.current() == 0 &&
-                     durable.acquire() == 0 && persistence.failed() &&
+                     slider.GetFrontier() == 0 && persistence.failed() &&
                      control.append_calls == 1 && control.sync_calls == 0;
   (void)persistence.close();
   tape.close();
@@ -202,18 +199,16 @@ constexpr PhysicalWalConfig physical_config{
   PersistenceModule persistence;
   if (!open(tape, persistence, path) || !publish(tape, 0)) return false;
 
-  Frontier durable;
-  PersistenceSlider persistence_slider(tape, durable, persistence, 1);
-  Frontier no_op_frontier;
+  PersistenceSlider persistence_slider(tape, persistence, 1);
   NoOpModule no_op;
-  Slider no_op_slider(tape, durable, no_op_frontier, no_op);
+  Slider no_op_slider(tape, persistence_slider, no_op);
 
   detail::PhysicalWalFileTestControl initial_control{};
   {
     PhysicalControlGuard guard(initial_control);
     if (!persistence_slider.process_available().ok()) return false;
   }
-  if (durable.acquire() != 1 || !publish(tape, 1) || !publish(tape, 2)) {
+  if (persistence_slider.GetFrontier() != 1 || !publish(tape, 1) || !publish(tape, 2)) {
     return false;
   }
 
@@ -225,8 +220,8 @@ constexpr PhysicalWalConfig physical_config{
     PhysicalControlGuard guard(failure_control);
     failed = persistence_slider.process_available();
   }
-  if (failed.status != SliderStatus::PublishFailed ||
-      failed.processed_count != 2 || durable.acquire() != 1 ||
+  if (failed.status != SliderStatus::ModuleFailed ||
+      failed.processed_count != 2 || persistence_slider.GetFrontier() != 1 ||
       !persistence.failed() || failure_control.append_calls != 2 ||
       failure_control.sync_calls != 1) {
     return false;
@@ -236,8 +231,8 @@ constexpr PhysicalWalConfig physical_config{
   const SliderResult hidden = no_op_slider.process_available();
   const bool valid = drained.ok() && drained.processed_count == 1 &&
                      hidden.status == SliderStatus::Empty &&
-                     no_op_frontier.acquire() == 1 &&
-                     tape.reclaim(no_op_frontier.acquire()) ==
+                     no_op_slider.GetFrontier() == 1 &&
+                     tape.reclaim(no_op_slider.GetFrontier()) ==
                          ReclaimStatus::Ok &&
                      tape.tail() == 1 && tape.head() == 3;
   (void)persistence.close();

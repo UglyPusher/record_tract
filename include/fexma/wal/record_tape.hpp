@@ -71,6 +71,7 @@ public:
 
   [[nodiscard]] bool is_open() const noexcept;
   [[nodiscard]] Position head() const noexcept;
+  [[nodiscard]] Position GetFrontier() const noexcept { return head(); }
   [[nodiscard]] Position tail() const noexcept;
 
 private:

@@ -8,57 +8,25 @@
 #include <fexma/wal/record_tape.hpp>
 #include <fexma/wal/record_tape_types.hpp>
 
-#include <array>
 #include <atomic>
+#include <algorithm>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 
 namespace fexma::wal {
 
-class alignas(64) Frontier final {
-public:
-  explicit Frontier(Position initial = 0) noexcept : value_(initial) {}
-
-  Frontier(const Frontier&) = delete;
-  Frontier& operator=(const Frontier&) = delete;
-  Frontier(Frontier&&) = delete;
-  Frontier& operator=(Frontier&&) = delete;
-
-  [[nodiscard]] Position acquire() const noexcept {
-    return value_.load(std::memory_order_acquire);
-  }
-
-  [[nodiscard]] bool publish(Position end) noexcept {
-    const Position current = value_.load(std::memory_order_relaxed);
-    if (end < current) return false;
-    value_.store(end, std::memory_order_release);
-    return true;
-  }
-
-  // Cold-path initialization: no reader or writer may be active.
-  void reset_quiescent(Position initial) noexcept {
-    value_.store(initial, std::memory_order_relaxed);
-  }
-
-private:
-  static constexpr std::size_t cache_line_size = 64;
-  static_assert(std::atomic<Position>::is_always_lock_free);
-
-  std::atomic<Position> value_{};
-  std::array<std::byte,
-             cache_line_size - sizeof(std::atomic<Position>)>
-      padding_{};
+struct ExecutionPolicy final {
+  std::size_t read_count{1};
+  std::size_t publish_count{1};
 };
-
-static_assert(sizeof(Frontier) == 64);
 
 enum class SliderStatus : std::uint8_t {
   Processed,
   Empty,
   UpstreamRegression,
   ViewUnavailable,
-  ModuleFailed,
-  PublishFailed
+  ModuleFailed
 };
 
 struct SliderResult {
@@ -72,21 +40,30 @@ struct SliderResult {
   }
 };
 
-template <class Module>
+template <class Predecessor, class Module>
 class Slider final {
 public:
-  Slider(const RecordTape& source, Frontier& own, Module& module) noexcept
-      : source_(source), own_(own), module_(module) {}
-
-  Slider(const RecordTape& source, const Frontier& upstream, Frontier& own,
+  Slider(const RecordTape& source, const Predecessor& predecessor,
          Module& module) noexcept
-      : source_(source), upstream_(&upstream), own_(own), module_(module) {}
+      : Slider(source, predecessor, module, ExecutionPolicy{}) {}
+
+  Slider(const RecordTape& source, const Predecessor& predecessor,
+         Module& module, ExecutionPolicy policy) noexcept
+      : source_(source), predecessor_(predecessor), module_(module),
+        policy_(normalize(policy)) {}
+
+  Slider(const RecordTape& source, Module& module) noexcept
+      requires std::same_as<Predecessor, RecordTape>
+      : Slider(source, source, module, ExecutionPolicy{}) {}
+
+  Slider(const RecordTape& source, Module& module, ExecutionPolicy policy) noexcept
+      requires std::same_as<Predecessor, RecordTape>
+      : Slider(source, source, module, policy) {}
 
   [[nodiscard]] SliderResult process_available() noexcept {
-    Position current = own_.acquire();
+    Position current = GetFrontier();
 
-    const Position available_end =
-        upstream_ == nullptr ? source_.head() : upstream_->acquire();
+    const Position available_end = predecessor_.GetFrontier();
     if (available_end < current) {
       return {SliderStatus::UpstreamRegression, current, 0};
     }
@@ -95,36 +72,75 @@ public:
     }
 
     std::uint64_t processed_count = 0;
+    std::size_t since_publish = 0;
     while (current < available_end) {
-      const AccessResult access = source_.try_view(current);
-      if (!access.ok()) {
-        return {SliderStatus::ViewUnavailable, current, processed_count,
-                access.status};
-      }
-      if (!module_.process(access.record)) {
-        return {SliderStatus::ModuleFailed, current, processed_count};
-      }
+      const Position pass_end =
+          current + std::min<Position>(policy_.read_count, available_end - current);
+      while (current < pass_end) {
+        const AccessResult access = source_.try_view(current);
+        if (!access.ok()) {
+          flush(current, since_publish);
+          return {SliderStatus::ViewUnavailable, current, processed_count,
+                  access.status};
+        }
+        if (!module_.process(access.record)) {
+          flush(current, since_publish);
+          return {SliderStatus::ModuleFailed, current, processed_count};
+        }
 
-      ++current;
-      ++processed_count;
-      if (!own_.publish(current)) {
-        return {SliderStatus::PublishFailed, current, processed_count};
+        ++current;
+        ++processed_count;
+        ++since_publish;
+        if (since_publish == policy_.publish_count) {
+          publish(current);
+          since_publish = 0;
+        }
       }
     }
+    if (since_publish != 0) publish(current);
     return {SliderStatus::Processed, current, processed_count};
   }
 
-  [[nodiscard]] Position current() const noexcept { return own_.acquire(); }
+  [[nodiscard]] Position GetFrontier() const noexcept {
+    return frontier_.load(std::memory_order_acquire);
+  }
+
+  [[nodiscard]] Position current() const noexcept { return GetFrontier(); }
   // Cold-path initialization: process_available() must not be active.
   void reset_quiescent(Position initial) noexcept {
-    own_.reset_quiescent(initial);
+    frontier_.store(initial, std::memory_order_relaxed);
   }
 
 private:
+  [[nodiscard]] static constexpr ExecutionPolicy
+  normalize(ExecutionPolicy policy) noexcept {
+    return policy.read_count == 0 || policy.publish_count == 0
+               ? ExecutionPolicy{}
+               : policy;
+  }
+
+  void flush(Position current, std::size_t since_publish) noexcept {
+    if (since_publish != 0) publish(current);
+  }
+
+  void publish(Position end) noexcept {
+    frontier_.store(end, std::memory_order_release);
+  }
+
+  static_assert(std::atomic<Position>::is_always_lock_free);
+
   const RecordTape& source_;
-  const Frontier* upstream_{};
-  Frontier& own_;
+  const Predecessor& predecessor_;
   Module& module_;
+  const ExecutionPolicy policy_;
+  alignas(64) std::atomic<Position> frontier_{};
 };
+
+template <class Module>
+Slider(const RecordTape&, Module&) -> Slider<RecordTape, Module>;
+
+template <class Module>
+Slider(const RecordTape&, Module&, ExecutionPolicy)
+    -> Slider<RecordTape, Module>;
 
 } // namespace fexma::wal

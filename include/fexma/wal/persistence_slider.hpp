@@ -9,18 +9,18 @@
 #include <fexma/wal/slider.hpp>
 #include <fexma/wal/record_tape_types.hpp>
 
+#include <atomic>
+
 namespace fexma::wal {
 
 class PersistenceSlider final {
 public:
-  PersistenceSlider(const RecordTape& source, Frontier& durable,
-                    PersistenceModule& persistence,
+  PersistenceSlider(const RecordTape& source, PersistenceModule& persistence,
                     Position maximum_count = 0) noexcept
-      : source_(source), durable_(durable), persistence_(persistence),
-        maximum_count_(maximum_count) {}
+      : source_(source), persistence_(persistence), maximum_count_(maximum_count) {}
 
   [[nodiscard]] SliderResult process_available() noexcept {
-    Position current = durable_.acquire();
+    Position current = GetFrontier();
     const Position available_end = source_.head();
     if (available_end < current) {
       return {SliderStatus::UpstreamRegression, current, 0};
@@ -48,18 +48,20 @@ public:
       ++processed_count;
     }
 
-    if (!persistence_.sync() || !durable_.publish(current)) {
-      return {SliderStatus::PublishFailed, current, processed_count};
+    if (!persistence_.sync() || !publish(current)) {
+      return {SliderStatus::ModuleFailed, current, processed_count};
     }
     return {SliderStatus::Processed, current, processed_count};
   }
 
-  [[nodiscard]] Position current() const noexcept {
-    return durable_.acquire();
+  [[nodiscard]] Position GetFrontier() const noexcept {
+    return frontier_.load(std::memory_order_acquire);
   }
 
+  [[nodiscard]] Position current() const noexcept { return GetFrontier(); }
+
   void reset_quiescent(Position initial) noexcept {
-    durable_.reset_quiescent(initial);
+    frontier_.store(initial, std::memory_order_relaxed);
   }
 
   void set_maximum_count(Position maximum_count) noexcept {
@@ -67,10 +69,17 @@ public:
   }
 
 private:
+  [[nodiscard]] bool publish(Position end) noexcept {
+    const Position current = frontier_.load(std::memory_order_relaxed);
+    if (end < current) return false;
+    frontier_.store(end, std::memory_order_release);
+    return true;
+  }
+
   const RecordTape& source_;
-  Frontier& durable_;
   PersistenceModule& persistence_;
   Position maximum_count_{};
+  alignas(64) std::atomic<Position> frontier_{};
 };
 
 } // namespace fexma::wal
