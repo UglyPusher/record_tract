@@ -3,8 +3,9 @@
 ## Core Model
 
 `record_tract` provides a single-publisher, multi-consumer ordered record tract.
-The core contract is defined by `RecordTape`, `Frontier`, `Slider<Module>`, the
-module processing contract, and composition-owned topology and reclamation.
+The core contract is defined by `RecordTape`, owner-specific progress
+boundaries, `Slider<Predecessor, Module>`, the module processing contract, and
+composition-owned topology and reclamation.
 Physical WAL persistence is a specialized optional stage described separately
 below.
 
@@ -20,6 +21,7 @@ public:
   void close() noexcept;
 
   Position head() const noexcept;
+  Position GetFrontier() const noexcept;
   Position tail() const noexcept;
 };
 ```
@@ -39,35 +41,42 @@ all mandatory readers have finished below `end`.
 `RecordTapeConfig` contains only runtime storage fields: fixed payload size,
 capacity, and allocation alignment.
 
-## Frontier And Slider
+## Progress Boundaries And Slider
 
 Ordinary stage mechanics are provided by `slider.hpp`:
 
 ```cpp
-Frontier frontier(initial_exclusive_end);
-Slider slider(tape, frontier, module); // upstream is RecordTape::head()
+RecordTape tape;
+NoOpModule first_module;
+NoOpModule second_module;
 
-SliderResult result = slider.process_available();
-Position visible_downstream = frontier.acquire();
+Slider first(tape, first_module);
+Slider second(tape, first, second_module);
+
+SliderResult first_result = first.process_available();
+SliderResult second_result = second.process_available();
+Position visible_downstream = second.GetFrontier();
 ```
 
 Every frontier value is an exclusive end: value `N` certifies completion of
-positions `[0, N)`. `Frontier` owns one cache-line-isolated atomic. A Slider
-holds its own non-const frontier reference and may publish it; downstream
-stages receive a const reference and can only acquire it. The public
-`Frontier::publish()` operation does not enforce publisher identity, so a valid
-composition must designate exactly one runtime publisher for each processing
-frontier.
+positions `[0, N)` for the owner that exposes it. `RecordTape::GetFrontier()` is
+its published boundary and is equivalent to `head()`. Each Slider owns its
+processed boundary and exposes acquire observation through `GetFrontier()`.
+These owners do not share a public frontier type or necessarily use identical
+internal mechanics.
 
-`process_available()` is one synchronous call. It snapshots the upstream
-exclusive end, obtains every consecutive immutable `RecordView` through that
-end, and calls `module.process(record)`. The module returns `true` only after
-processing that position is complete. Only then does Slider publish the next
-exclusive end to its own frontier.
+`Slider<Predecessor, Module>` holds a const reference to its predecessor. The
+predecessor structurally provides a suitable `GetFrontier()` operation; it need
+not be a Slider. The separately supplied `RecordTape` remains the source of
+record data. A root Slider uses the tape itself as predecessor, while a
+downstream Slider may use another Slider as shown above.
 
-The first stage reads `RecordTape::head()` directly. A later stage receives an
-explicit `const Frontier&` as upstream. Multiple stages may consume directly
-from `head` or form explicit frontier dependencies. The library does not
+`process_available()` is one synchronous call. It snapshots
+`predecessor.GetFrontier()`, obtains every consecutive immutable `RecordView`
+from the source tape through that exclusive end, and calls
+`module.process(record)`. The module returns `true` only after processing that
+position is complete. Only completed progress may be published to the Slider's
+own frontier according to its current execution policy. The library does not
 prescribe the number of processing stages or provide a runtime topology.
 
 The slider owns no thread, scheduling loop, wait/spin/yield behavior, runtime
@@ -93,53 +102,78 @@ to its policy.
 `NoOpModule` accepts every complete `RecordView` without changing application
 state. It exists as the minimal module for composition tests. In the linear
 bare pipeline, the composition may call
-`tape.reclaim(no_op_frontier.acquire())` only after the slider call has
+`tape.reclaim(no_op_slider.GetFrontier())` only after the slider call has
 returned and all views from the reclaimed range are retired. Publishing the
 module frontier alone does not release storage or remove producer backpressure.
 
 ## Persistence Specialization
 
 `PhysicalWalConfig` contains persisted identity and physical layout fields and
-does not contain runtime capacity. `PersistenceModule` owns the selected live
-physical writer and its failure state for the current open writer lifetime. It
-does not own or publish a frontier and does not select batches.
-`process(record)` is its slider-facing append operation. Append or sync failure
-is terminal until that writer lifetime is closed; a later successful `open()`
-starts a new writer lifetime and clears the failure state. Failure publication
-is atomic so the producer role can stop after observing a terminal append or
-sync failure.
+does not contain runtime capacity. Public Persistence is the independent
+`Persistence<Predecessor>` tract mechanism; it is not a generic Slider paired
+with a persistence module. It receives a `RecordTape` as its record source and a
+predecessor as the source of its permitted boundary. A root Persistence may use
+the same tape as both source and predecessor.
 
 ```cpp
-class PersistenceModule {
+struct PersistencePolicy final {
+  std::size_t sync_count{1};
+};
+
+template <class Predecessor>
+class Persistence {
 public:
+  Persistence(const RecordTape& source, const Predecessor& predecessor,
+              PersistencePolicy policy = {}) noexcept;
+  explicit Persistence(const RecordTape& source,
+                       PersistencePolicy policy = {}) noexcept
+      requires std::same_as<Predecessor, RecordTape>;
+
   OpenResult open(const std::filesystem::path& path,
                   const PhysicalWalConfig& config) noexcept;
-  bool process(const RecordView& record) noexcept;
-  bool append(const RecordView& record) noexcept;
-  bool sync() noexcept;
   bool close() noexcept;
   bool is_open() const noexcept;
   bool failed() const noexcept;
-};
 
-class PersistenceSlider {
-public:
-  PersistenceSlider(const RecordTape& source, Frontier& durable,
-                    PersistenceModule& persistence,
-                    Position maximum_count = 0) noexcept;
   SliderResult process_available() noexcept;
+  Position GetFrontier() const noexcept;
   Position current() const noexcept;
   void reset_quiescent(Position initial) noexcept;
-  void set_maximum_count(Position maximum_count) noexcept;
 };
 ```
 
-`PersistenceSlider` is separate from generic `Slider<Module>` because it selects
-a bounded batch, appends every selected record, synchronizes the complete batch
-once, and only then publishes its frontier. In a persistence composition that
-frontier is conventionally named `durable`. Append or sync failure leaves
-durable progress unchanged and is terminal for the current open writer
-lifetime.
+The supported root and chained construction forms are:
+
+```cpp
+RecordTape tape;
+Persistence root_persistence(tape, PersistencePolicy{8});
+
+NoOpModule module;
+Slider predecessor(tape, module);
+Persistence chained_persistence(tape, predecessor, PersistencePolicy{8});
+```
+
+Both Persistence objects read records from `tape`. The root object also uses
+the tape as its predecessor; the chained object obtains its permitted boundary
+from `predecessor.GetFrontier()`.
+
+`Persistence<Predecessor>` is separate from generic Slider processing because
+it selects a bounded batch, appends every selected record, synchronizes the
+complete batch once, and only then publishes its owner-held frontier. In a
+persistence composition that frontier is conventionally named `durable`.
+Append or sync failure leaves durable progress unchanged and is terminal for
+the current open writer lifetime.
+
+`detail::PersistenceCore` implements the non-template mechanics behind the
+public template. It owns the current policy, durable progress atomic, terminal
+failure state, and selected `PhysicalWalAdapter`. It is an implementation
+detail, not a separately composed public stage.
+
+`PhysicalWalAdapter` is the internal boundary to the selected concrete physical
+WAL implementation. Persistence chooses the batch, requests append and sync,
+publishes durable progress after success, and propagates failure. The adapter
+creates and writes the physical file, appends physical records, synchronizes,
+and closes its native handle.
 
 ### Physical WAL Payload And Identity
 
@@ -223,12 +257,10 @@ owns `reclaim()`. Coordinated read-only users may call `try_view()` while the
 retention precondition is maintained. `open()` and `close()` require all these
 roles to be stopped.
 
-Each processing frontier has exactly one runtime publisher designated by the
-composition. A Slider normally holds that frontier's non-const reference and
-publishes it; other stages observe it through const references. `Frontier`
-itself does not enforce publisher identity. Stage topology, execution policy,
-and selection of the frontier or frontiers that protect reclamation belong to
-the composition.
+Each Slider owns and publishes its processing frontier. A valid composition has
+one runtime executor mutating a Slider while other stages observe its progress
+through `GetFrontier()`. Stage topology, execution policy, and selection of the
+frontier or frontiers that protect reclamation belong to the composition.
 
 ## Payload Lifetime
 
@@ -258,8 +290,8 @@ Status reflects the observed frontiers; publication may advance concurrently.
 The operation acquires `head` before exposing producer-written bytes. It does
 not require persistence success or consult `durable`: retained pending records
 are accessible to persistence and other appropriately coordinated readers.
-A downstream stage must separately acquire and obey its upstream frontier
-before using a view.
+A downstream stage must obtain and obey its permitted boundary through its
+predecessor's `GetFrontier()` before using a view.
 
 Coordinates remain:
 
@@ -306,41 +338,42 @@ Downstream stages may finish the already published valid prefix.
 
 ## Persistence Progress
 
-`PersistenceSlider::process_available()` selects at most its configured
-maximum count from `[durable, head)`. A configured `maximum_count` of zero
-disables persistence processing: `process_available()` returns
-`SliderStatus::Empty` without appending or synchronizing even when
-`head > durable`. An empty selection for any reason performs no physical sync.
+`Persistence<Predecessor>::process_available()` reads its permitted boundary
+from `predecessor.GetFrontier()` and selects at most its configured
+`sync_count` from `[durable, permitted boundary)`. A configured `sync_count` of
+zero is normalized to the default count of one. An empty selection performs no
+physical sync.
 
 For a non-empty batch the physical writer:
 
 1. appends every physical record in sequence order;
 2. performs exactly one OS-level physical synchronization;
-3. reports success to the persistence slider.
+3. reports success to Persistence.
 
-Only then does the persistence slider publish the batch end as the new
+Only then does Persistence publish the batch end as the new
 `durable` frontier.
 
 Physical synchronization is `FlushFileBuffers` on Windows, `fdatasync` on
 POSIX, and `fsync` on macOS. Creating a file also synchronizes its initial
 header; POSIX creation additionally synchronizes the parent directory entry.
 
-Append or sync failure leaves `durable` unchanged and puts
-`PersistenceModule` into its terminal failed state for the current open writer
-lifetime. On sync failure, records from the failed batch may already have been
-appended to the physical file; there is no rollback or truncation in the live
-writer. Those records remain invisible to downstream runtime stages because
-`durable` is not advanced. After a crash or writer shutdown, the authoritative
-physical history is instead determined by validated WAL scanning and recovery
-rules, independently of the lost runtime `durable` frontier.
+Append or sync failure leaves `durable` unchanged and puts Persistence into its
+terminal failed state for the current open writer lifetime. On sync failure,
+records from the failed batch may already have been appended to the physical
+file; there is no rollback or truncation in the live writer. Those records
+remain invisible to downstream runtime stages because `durable` is not
+advanced. After a crash or writer shutdown, the authoritative physical history
+is instead determined by validated WAL scanning and recovery rules,
+independently of the lost runtime `durable` frontier.
 
 ## Lifecycle
 
 `RecordTape::open()` validates configuration, allocates and warms ring storage,
-and resets its intrinsic boundaries. Generic stage frontiers are owned and
-initialized by the composition.
+and resets its intrinsic boundaries. Each generic Slider owns its processed
+frontier; `reset_quiescent()` initializes that boundary only while processing is
+stopped.
 
-`PersistenceModule::open()` creates and physically synchronizes a new WAL file.
+`Persistence::open()` creates and physically synchronizes a new WAL file.
 Creation is exclusive: an existing path returns `OpenStatus::FileAlreadyExists`
 and is not modified. A successful open starts a new writer lifetime and clears
 any failure state left by a previous closed lifetime. Cold-path incomplete-tail
@@ -350,7 +383,7 @@ components in a safe order.
 
 ## Intentional Limits
 
-- Existing WAL files cannot be reopened by `PersistenceModule`.
+- Existing WAL files cannot be reopened by Persistence.
 - Recovery removes only scanner-proven incomplete trailing records. It does not
   repair corruption or reopen an existing live writer.
 - There is no segment rotation, compaction, or consumer checkpoint.

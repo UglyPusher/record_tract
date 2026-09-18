@@ -23,21 +23,22 @@ state.
 
 ## Processing Frontier Order
 
-A slider's own Frontier is its single authoritative current exclusive end:
+A Slider's internally owned frontier is its single authoritative current
+exclusive end:
 
 ```text
 own frontier <= observed upstream frontier
 ```
 
-- The upstream reference is const and therefore read-only through that
-  reference.
-- The composition designates exactly one runtime publisher for each processing
-  frontier; a Slider normally holds that frontier's non-const reference and
-  publishes it. `Frontier` itself does not enforce publisher identity.
-- A range must begin at the own Frontier value acquired at entry and end no
-  later than the acquired upstream frontier.
+- The predecessor reference is const and supplies the permitted boundary
+  through `GetFrontier()`.
+- The Slider owns and publishes its processing frontier. A valid composition
+  has one runtime executor mutating that Slider while observers use
+  `GetFrontier()`.
+- A range must begin at the Slider's own frontier value acquired at entry and
+  end no later than the predecessor frontier acquired at entry.
 - A record view is obtained by its absolute zero-based position.
-- The module must complete position `p` successfully before the own Frontier
+- The module must complete position `p` successfully before the own frontier
   becomes `p + 1`.
 - Own frontier publication occurs only after successful module completion.
 - Release publication of exclusive end `p + 1` makes module output for
@@ -55,9 +56,10 @@ For the bare linear composition:
 tail <= NoOpF <= head
 ```
 
-Publication of `NoOpF` certifies module completion but does not reclaim a
-position. Only the composition writes `tail`, after the corresponding slider
-call has returned and its borrowed views are retired. Stopping either slider
+`NoOpF` is the value returned by `no_op_slider.GetFrontier()`. Its publication
+certifies module completion but does not reclaim a position. Only the
+composition writes `tail`, after the corresponding Slider call has returned
+and its borrowed views are retired. Stopping either Slider
 execution or composition reclamation therefore preserves bounded backpressure.
 
 For a linear dependency chain of processing stages, processing progress obeys:
@@ -73,8 +75,8 @@ safe for every mandatory stage, reader, or other participant that protects
 retention.
 
 The number of stages is not part of the tract contract. A composition may also
-have multiple stages consuming from the same upstream boundary; each processing
-frontier has one publisher designated by that composition.
+have multiple stages using the same predecessor boundary; each Slider owns and
+publishes its own processing frontier.
 
 ## Core Ownership
 
@@ -101,16 +103,20 @@ interpreted as the new record in a reused slot under this contract.
 For one processing dependency:
 
 ```text
-producer --head--> stage --frontier--> downstream stage
+producer --RecordTape::GetFrontier()--> Slider
+                                          |
+                                          v
+                              Slider::GetFrontier() --> downstream stage
 ```
 
 - Payload copy happens before `head.store(..., release)`.
 - Retained view access acquires `head` before exposing payload bytes.
-- A stage observes its upstream boundary before processing available records.
+- A Slider acquires `predecessor.GetFrontier()` before processing available
+  records from its separately supplied tape.
 - Module completion for position `p` happens before publication of frontier
   `p + 1`.
-- A downstream stage acquires its upstream frontier before relying on the
-  corresponding module output.
+- A downstream stage acquires its predecessor's frontier through
+  `GetFrontier()` before relying on the corresponding module output.
 - Reclamation happens only after the composition has established that all
   mandatory users of the reclaimed positions are finished.
 - Producer acquires `tail` before reusing capacity.
@@ -120,8 +126,9 @@ No frontier operation uses `seq_cst`.
 ## Persistence Composition Invariants
 
 Persistence is a specialized stage. In a composition where
-`PersistenceSlider` consumes directly from `head`, its frontier may be named
-`durable`:
+`Persistence<RecordTape>` uses the tape as its predecessor, the tape's
+`GetFrontier()` supplies the permitted boundary and the persistence-owned
+frontier may be named `durable`:
 
 ```text
 tail <= durable <= head
@@ -133,8 +140,7 @@ head - tail <= capacity
   caller-owned retention contract; accessibility does not prove durability.
 - Position `p` maps to block `p % capacity` only after absolute range
   validation.
-- The composition designates `PersistenceSlider` as the sole runtime publisher
-  of the `durable` frontier.
+- The `Persistence` stage owns and publishes the `durable` frontier.
 - Append and physical sync of the complete selected batch happen before
   publication of its batch-end durable frontier.
 - A downstream stage that requires durability must acquire and obey the
@@ -166,12 +172,12 @@ For persistence:
 - a failed append or sync does not move `durable`;
 - retained views remain independent of durability and do not grant downstream
   permission;
-- a failed persistence module prevents further durable progress for the current
+- a failed Persistence prevents further durable progress for the current
   open writer lifetime.
 
-`PersistenceModule` owns its terminal failure state for the current open writer
+Persistence owns its terminal failure state for the current open writer
 lifetime; `RecordTape` remains unaware of it. Closing that lifetime and later
-successfully opening a new writer lifetime clears the module failure state. A
+successfully opening a new writer lifetime clears the failure state. A
 composition with mandatory persistence must stop production or otherwise
 preserve bounded safety after observing failure in the active lifetime.
 

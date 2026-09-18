@@ -1,15 +1,29 @@
 # record_tract
 
 `record_tract` is a C++20 library for a single-publisher, multi-consumer ordered
-record tract. Its core is a bounded `RecordTape` with explicit `Frontier`
-progress and statically composed `Slider<Module>` processing stages. Physical
-WAL persistence is an optional specialized stage built on the same tract.
+record tract. Its core is a bounded `RecordTape` with owner-specific progress
+boundaries and statically composed `Slider<Predecessor, Module>` processing
+stages. Physical WAL persistence is an optional specialized stage built on the
+same tract.
 Low-level serialization helpers are exposed under `<fexma/binary/...>`.
 
-The exported CMake targets are:
+The available build-tree CMake targets are:
 
+- `fexma::record_tract`
 - `fexma::wal`
 - `fexma::binary`
+
+`fexma::record_tract` contains the Core implementation and public/header-only
+Core facilities. `fexma::wal` contains Persistence, physical WAL, Reader, and
+Recovery and has a `PUBLIC` dependency on `fexma::record_tract`; existing WAL
+consumers therefore retain transitive access to Core. These are build-tree
+aliases; the repository does not currently define install or package-export
+rules.
+
+```cmake
+target_link_libraries(core_consumer PRIVATE fexma::record_tract)
+target_link_libraries(wal_consumer PRIVATE fexma::wal)
+```
 
 ## Core Record Tract
 
@@ -24,25 +38,49 @@ head - tail <= capacity
 views, bounded reclamation, and position exhaustion handling. It contains no
 persistence frontier, file writer, or persistence failure state.
 
-A `Frontier` is a monotonic exclusive progress boundary. `Frontier N` certifies
-that positions `[0, N)` have completed the work represented by that frontier.
-Each processing stage publishes its own frontier.
+A frontier is an owner-specific monotonic exclusive progress boundary. A value
+of `N` certifies that positions `[0, N)` have completed the work represented by
+that owner. `RecordTape::GetFrontier()` returns its published boundary and is
+equivalent to `head()`. Each Slider owns its processed boundary and exposes it
+through `Slider::GetFrontier()`. There is no standalone public frontier object.
 
-`Slider<Module>` provides synchronous stage mechanics over `RecordTape`. It
-reads either `RecordTape::head()` or an explicit upstream `Frontier`, processes
-available records in position order through one statically bound module, and
-publishes its own `Frontier` after each successful record. It owns no worker,
-polling loop, wait strategy, runtime topology, or domain semantics.
+`Slider<Predecessor, Module>` provides synchronous stage mechanics over
+`RecordTape`. The separately supplied `RecordTape` provides record data through
+`try_view(position)`. The predecessor provides the permitted exclusive end
+through `GetFrontier()`. The Slider processes permitted records in position
+order through one statically bound module and publishes completed progress to
+its own frontier. It owns no worker, polling loop, wait strategy, runtime
+topology, or domain semantics.
+
+The root and downstream construction forms are:
+
+```cpp
+RecordTape tape;
+NoOpModule first_module;
+NoOpModule second_module;
+
+Slider first(tape, first_module);         // predecessor is tape
+Slider second(tape, first, second_module); // predecessor is first
+```
+
+`RecordTape` can be the root predecessor because its `GetFrontier()` is its
+published `head`. A downstream predecessor need not be a Slider; it need only
+provide the structurally required `GetFrontier()` operation. In every case the
+record data still comes from `tape`.
 
 The first bare composition is:
 
 ```text
-producer -> RecordTape::head -> Slider<NoOpModule> -> Frontier -> reclaimer -> tail
+producer -> RecordTape::GetFrontier() -> Slider<NoOpModule>
+                                           |
+                                           v
+                                Slider::GetFrontier() -> reclaimer -> tail
 ```
 
-More generally, multiple stages may consume directly from `head` or depend on
-explicit upstream frontiers. Stage topology, execution policy, and reclamation
-policy belong to the composition rather than to `RecordTape` or `Slider`.
+More generally, multiple stages may use the tape or another structurally
+compatible owner as their predecessor. Stage topology, execution policy, and
+reclamation policy belong to the composition rather than to `RecordTape` or
+`Slider`.
 
 `NoOpModule` is the trivial always-successful module used to prove the minimal
 tract composition.
@@ -56,20 +94,29 @@ a shared contract.
 ## Optional WAL Persistence
 
 Persistence is a specialized tract stage, not an intrinsic property of
-`RecordTape`. `PersistenceModule` owns live append/sync and its terminal failure
-state for the current open writer lifetime. Its lifecycle is independent from
-the tape; a later successful `open()` starts a new writer lifetime and clears
-the previous failure state.
+`RecordTape`. `Persistence<Predecessor>` owns its durability mechanics and
+terminal failure state for the current open writer lifetime. Its lifecycle is
+independent from the tape; a later successful `open()` starts a new writer
+lifetime and clears the previous failure state.
 
-`PersistenceSlider` binds persistence processing to `RecordTape::head()` and a
-frontier representing durable progress. Unlike the generic per-record slider,
-it appends a bounded batch, performs one OS-level physical sync, and publishes
-the durable frontier only after the complete batch has synchronized.
+`Persistence<Predecessor>` obtains its permitted boundary from its predecessor
+and owns a frontier representing durable progress. Unlike the generic
+per-record Slider, it appends a bounded batch, performs one OS-level physical
+sync, and publishes the durable frontier only after the complete batch has
+synchronized. `Persistence::GetFrontier()` is the exclusive end of the records
+whose required durability operation has succeeded.
+
+The default `PersistencePolicy::sync_count` is one. It is the maximum number of
+records appended and synchronized as one durability batch by a single
+`process_available()` call; zero is normalized to the default of one.
 
 One persistence composition can therefore be wired as:
 
 ```text
-producer -> head -> PersistenceSlider -> durable Frontier -> downstream stage
+producer -> RecordTape::GetFrontier() -> Persistence<RecordTape>
+                                              |
+                                              v
+                                   durable GetFrontier() -> downstream stage
 ```
 
 For that specific composition:
