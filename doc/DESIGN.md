@@ -28,6 +28,20 @@ range visible in one predecessor observation and publishes completed progress
 to its internally owned frontier. The caller owns repeated execution and all
 waiting or scheduling.
 
+`ExecutionPolicy::read_count` partitions that traversal into internal read
+passes. It does not bound the total work of `process_available()`: absent
+failure, the call drains the complete range from its one predecessor-frontier
+observation. Because the current tape path borrows one zero-copy `RecordView` at
+a time, the pass size has no externally observable effect on successful
+processing. The boundary remains part of the mechanics for read paths that may
+later need bounded materialization, without specifying such a path now.
+
+`ExecutionPolicy::publish_count` controls release-publication cadence for the
+Slider-owned frontier. Complete publication batches are published during the
+call; final successful residual progress and a successful residual prefix before
+failure are flushed before return. A zero in either policy field invalidates the
+value object and normalizes the whole policy to `{1, 1}`.
+
 A module owns processing semantics. The generic slider requires only synchronous
 `process(const RecordView&)` success or failure; it does not know what the
 module computes or publishes outside its own progress frontier.

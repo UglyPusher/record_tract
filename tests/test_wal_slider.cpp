@@ -30,6 +30,41 @@ public:
 private: Position value_{};
 };
 
+class FrontierObservingModule final {
+public:
+  template <class Owner>
+  void observe(const Owner& owner) noexcept {
+    owner_ = &owner;
+    get_frontier_ = [](const void* value) noexcept {
+      return static_cast<const Owner*>(value)->GetFrontier();
+    };
+  }
+
+  bool process(const RecordView& record) noexcept {
+    positions_[count_] = record.position;
+    observed_frontiers_[count_] = get_frontier_(owner_);
+    ++count_;
+    return true;
+  }
+
+  std::size_t count() const noexcept { return count_; }
+  Position position(std::size_t index) const noexcept {
+    return positions_[index];
+  }
+  Position observed_frontier(std::size_t index) const noexcept {
+    return observed_frontiers_[index];
+  }
+
+private:
+  using GetFrontier = Position (*)(const void*) noexcept;
+
+  const void* owner_{};
+  GetFrontier get_frontier_{};
+  std::array<Position, 8> positions_{};
+  std::array<Position, 8> observed_frontiers_{};
+  std::size_t count_{};
+};
+
 bool open_tape(RecordTape& tape) { return tape.open({sizeof(Payload), 4, default_alignment}).ok(); }
 bool publish(RecordTape& tape, std::uint64_t value) { const Payload bytes=payload(value); return tape.try_publish(std::span<const std::byte>{bytes}).ok(); }
 
@@ -82,35 +117,109 @@ bool execution_policy_preserves_default_and_supports_batches() {
          first.processed_count == 2 && batched_slider.GetFrontier() == 2;
 }
 
+bool execution_policy_read_count_does_not_limit_one_call() {
+  RecordTape tape;
+  if (!tape.open({sizeof(Payload), 8, default_alignment}).ok()) return false;
+  for (std::uint64_t value = 0; value < 5; ++value) {
+    if (!publish(tape, value)) return false;
+  }
+
+  RecordingModule module;
+  Slider slider(tape, module, ExecutionPolicy{2, 4});
+  const SliderResult result = slider.process_available();
+  if (result.status != SliderStatus::Processed ||
+      result.processed_count != 5 || result.current != 5 ||
+      slider.GetFrontier() != 5 || module.count() != 5) {
+    return false;
+  }
+  for (Position position = 0; position < 5; ++position) {
+    if (module.position(static_cast<std::size_t>(position)) != position) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool execution_policy_publishes_cadence_and_partial_progress() {
   RecordTape tape;
   if (!tape.open({sizeof(Payload), 8, default_alignment}).ok() ||
       !publish(tape, 1) || !publish(tape, 2) ||
-      !publish(tape, 3) || !publish(tape, 4) || !publish(tape, 5) ||
-      !publish(tape, 6)) return false;
-  RecordingModule module(4);
+      !publish(tape, 3) || !publish(tape, 4) || !publish(tape, 5)) {
+    return false;
+  }
+
+  FrontierObservingModule module;
+  Slider slider(tape, module, ExecutionPolicy{3, 2});
+  module.observe(slider);
+  const SliderResult result = slider.process_available();
+  constexpr std::array<Position, 5> expected_frontiers{0, 0, 2, 2, 4};
+  if (result.status != SliderStatus::Processed ||
+      result.processed_count != 5 || result.current != 5 ||
+      slider.GetFrontier() != 5 || module.count() != 5) {
+    return false;
+  }
+  for (std::size_t index = 0; index < expected_frontiers.size(); ++index) {
+    if (module.position(index) != index ||
+        module.observed_frontier(index) != expected_frontiers[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool execution_policy_flushes_residual_before_failure() {
+  RecordTape tape;
+  if (!tape.open({sizeof(Payload), 8, default_alignment}).ok()) return false;
+  for (std::uint64_t value = 0; value < 5; ++value) {
+    if (!publish(tape, value)) return false;
+  }
+
+  RecordingModule module(3);
   Slider slider(tape, module, ExecutionPolicy{8, 4});
   const SliderResult failed = slider.process_available();
-  if (failed.status != SliderStatus::ModuleFailed || failed.processed_count != 4 ||
-      slider.GetFrontier() != 4) return false;
+  if (failed.status != SliderStatus::ModuleFailed ||
+      failed.processed_count != 3 || failed.current != 3 ||
+      slider.GetFrontier() != 3 || module.count() != 3) {
+    return false;
+  }
+
   module.allow_all();
   const SliderResult completed = slider.process_available();
   return completed.status == SliderStatus::Processed &&
-         completed.processed_count == 2 && slider.GetFrontier() == 6;
+         completed.processed_count == 2 && completed.current == 5 &&
+         slider.GetFrontier() == 5 && module.count() == 5;
 }
 
-bool execution_policy_zero_counts_fall_back_to_default() {
+bool policy_observes_canonical_publication(ExecutionPolicy policy) {
   RecordTape tape;
-  if (!open_tape(tape) || !publish(tape, 1)) return false;
-  RecordingModule module;
-  Slider zero_read(tape, module, ExecutionPolicy{0, 1});
-  Slider zero_publish(tape, module, ExecutionPolicy{1, 0});
-  const SliderResult read_result = zero_read.process_available();
-  const SliderResult publish_result = zero_publish.process_available();
-  return read_result.status == SliderStatus::Processed &&
-         read_result.processed_count == 1 && zero_read.GetFrontier() == 1 &&
-         publish_result.status == SliderStatus::Processed &&
-         publish_result.processed_count == 1 && zero_publish.GetFrontier() == 1;
+  if (!open_tape(tape) || !publish(tape, 1) || !publish(tape, 2) ||
+      !publish(tape, 3)) {
+    return false;
+  }
+
+  FrontierObservingModule module;
+  Slider slider(tape, module, policy);
+  module.observe(slider);
+  const SliderResult result = slider.process_available();
+  constexpr std::array<Position, 3> expected_frontiers{0, 1, 2};
+  if (result.status != SliderStatus::Processed ||
+      result.processed_count != 3 || result.current != 3 ||
+      slider.GetFrontier() != 3 || module.count() != 3) {
+    return false;
+  }
+  for (std::size_t index = 0; index < expected_frontiers.size(); ++index) {
+    if (module.position(index) != index ||
+        module.observed_frontier(index) != expected_frontiers[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool execution_policy_invalid_values_normalize_to_canonical_default() {
+  return policy_observes_canonical_publication(ExecutionPolicy{0, 4}) &&
+         policy_observes_canonical_publication(ExecutionPolicy{4, 0}) &&
+         policy_observes_canonical_publication(ExecutionPolicy{0, 0});
 }
 } // namespace
 
@@ -120,7 +229,10 @@ int main() {
   if (!rejects_regressed_upstream()) return 3;
   if (!reports_unavailable_views_without_publication()) return 4;
   if (!execution_policy_preserves_default_and_supports_batches()) return 5;
-  if (!execution_policy_publishes_cadence_and_partial_progress()) return 6;
-  if (!execution_policy_zero_counts_fall_back_to_default()) return 7;
+  if (!execution_policy_read_count_does_not_limit_one_call()) return 6;
+  if (!execution_policy_publishes_cadence_and_partial_progress()) return 7;
+  if (!execution_policy_flushes_residual_before_failure()) return 8;
+  if (!execution_policy_invalid_values_normalize_to_canonical_default())
+    return 9;
   return 0;
 }

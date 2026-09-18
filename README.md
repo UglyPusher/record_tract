@@ -52,6 +52,17 @@ order through one statically bound module and publishes completed progress to
 its own frontier. It owns no worker, polling loop, wait strategy, runtime
 topology, or domain semantics.
 
+`ExecutionPolicy::read_count` is the internal read-pass size;
+`process_available()` still drains the complete range visible in its single
+predecessor-frontier observation unless processing fails. With the current
+zero-copy `try_view(position)` path, read-pass boundaries do not change
+externally observable successful behavior. They are retained for read mechanics
+that may later require bounded materialization. `publish_count` is the number of
+successfully processed records between frontier publications. Final successful
+progress and a successful prefix before failure are flushed before return. If
+either policy field is zero, the entire policy is normalized to the canonical
+`ExecutionPolicy{}` value `{1, 1}`.
+
 The root and downstream construction forms are:
 
 ```cpp

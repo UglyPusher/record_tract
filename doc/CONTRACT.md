@@ -79,6 +79,40 @@ position is complete. Only completed progress may be published to the Slider's
 own frontier according to its current execution policy. The library does not
 prescribe the number of processing stages or provide a runtime topology.
 
+### Execution Policy
+
+```cpp
+struct ExecutionPolicy final {
+  std::size_t read_count{1};
+  std::size_t publish_count{1};
+};
+```
+
+`read_count` is the internal read-pass size. It partitions the traversal of the
+single observed predecessor range; it is not a maximum record count for
+`process_available()` and is not a yield or scheduling quantum. The current
+source path obtains one zero-copy borrowed `RecordView` at a time through
+`RecordTape::try_view()`, so read-pass boundaries currently do not change
+externally observable successful behavior. The pass structure is retained for
+read mechanics that may later require bounded materialization, without defining
+such a path today.
+
+`publish_count` is the processed-frontier publication batch size. After that
+many successful module calls, Slider release-publishes the next exclusive end.
+A residual successful prefix is published before successful return and before
+an existing module/view failure return. The failed or unavailable position is
+never included.
+
+ExecutionPolicy is normalized as one value object. If either count is zero, the
+entire policy becomes the canonical `ExecutionPolicy{}` value `{1, 1}`:
+
+```text
+{8, 4} -> {8, 4}
+{0, 4} -> {1, 1}
+{8, 0} -> {1, 1}
+{0, 0} -> {1, 1}
+```
+
 The slider owns no thread, scheduling loop, wait/spin/yield behavior, runtime
 registry, virtual dispatch, neighbor type, persistence operation, or snapshot
 interpretation. Calling and retry cadence belongs to the composition. A

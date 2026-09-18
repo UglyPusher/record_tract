@@ -50,6 +50,21 @@ own frontier <= observed upstream frontier
 The slider mechanics allocate no storage, copy no payload, interpret no record
 kind, and perform no persistence, snapshot I/O, waiting, or scheduling.
 
+Execution policy preserves these traversal and publication invariants:
+
+- `read_count` partitions the observed predecessor range into internal passes;
+  it does not limit the total records processed by one successful
+  `process_available()` call;
+- with the current per-position zero-copy view path, changing a valid
+  `read_count` does not change externally observable successful processing;
+- `publish_count` is the number of successful records between processed-frontier
+  publications;
+- a final successful residual prefix is published before return;
+- a successful residual prefix before module or view failure is published, but
+  the failed or unavailable position is not;
+- if either count is zero, the complete policy is normalized to the canonical
+  `{1, 1}` policy.
+
 For the bare linear composition:
 
 ```text
