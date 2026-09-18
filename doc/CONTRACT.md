@@ -370,6 +370,26 @@ If the exclusive `head` reaches the end of the `Position` domain,
 `try_publish()` returns `PositionExhausted`; no wrapped position is published.
 Downstream stages may finish the already published valid prefix.
 
+`PositionExhausted` is a defensive arithmetic invariant and terminal boundary
+condition, not an operationally reachable failure mode for the supported system
+lifetime. At a sustained rate of 10,000,000 positions per second, exhausting
+the 64-bit monotonic absolute position space takes approximately 58,455 years.
+The testing policy is therefore:
+
+```text
+PositionExhausted:
+    contract: REQUIRED
+    wraparound: FORBIDDEN
+    direct runtime test: NOT REQUIRED
+    RC blocker if untested: NO
+```
+
+No test hook, reduced-width `Position`, artificial initialization near
+`UINT64_MAX`, or equivalent production/test machinery is required solely to
+exercise this boundary. Its lack of a direct runtime test is not a test-coverage
+gap. Ordinary bounded-capacity exhaustion returns `Full` and remains a separate,
+operationally tested condition.
+
 ## Persistence Progress
 
 `Persistence<Predecessor>::process_available()` reads its permitted boundary
