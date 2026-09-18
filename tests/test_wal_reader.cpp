@@ -38,7 +38,8 @@ payload(std::uint64_t value) noexcept {
                               std::uint32_t records) {
   std::filesystem::remove(path);
   RecordTape tape;
-  Persistence persistence(tape, PersistencePolicy{records == 0 ? 1u : records});
+  Persistence persistence(tape, tape,
+                          PersistencePolicy{records == 0 ? 1u : records});
   if (!tape.open({config.payload_size, records == 0 ? 1u : records,
                   config.alignment})
            .ok()) {

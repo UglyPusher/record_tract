@@ -13,13 +13,15 @@
 
 namespace fexma::wal {
 
-Persistence::Persistence(const RecordTape& source, PersistencePolicy policy) noexcept
+detail::PersistenceCore::PersistenceCore(const RecordTape& source,
+                                         PersistencePolicy policy) noexcept
     : source_(source), policy_(policy.sync_count == 0 ? PersistencePolicy{} : policy) {}
 
-Persistence::~Persistence() { (void)close(); }
+detail::PersistenceCore::~PersistenceCore() { (void)close(); }
 
-OpenResult Persistence::open(const std::filesystem::path& path,
-                             const PhysicalWalConfig& config) noexcept {
+OpenResult detail::PersistenceCore::open(
+    const std::filesystem::path& path,
+    const PhysicalWalConfig& config) noexcept {
   if (is_open()) return {OpenStatus::AlreadyOpen};
   const WalConfig adapter_config{
       config.payload_size, 1, config.alignment, config.payload_schema_version,
@@ -39,7 +41,7 @@ OpenResult Persistence::open(const std::filesystem::path& path,
   return {OpenStatus::Ok};
 }
 
-bool Persistence::append(const RecordView& record) noexcept {
+bool detail::PersistenceCore::append(const RecordView& record) noexcept {
   if (!is_open() || failed_.load(std::memory_order_acquire) ||
       record.position > std::numeric_limits<std::uint64_t>::max() -
                             first_sequence_ ||
@@ -51,7 +53,7 @@ bool Persistence::append(const RecordView& record) noexcept {
   return true;
 }
 
-bool Persistence::sync() noexcept {
+bool detail::PersistenceCore::sync() noexcept {
   if (!is_open() || failed_.load(std::memory_order_acquire) ||
       !physical_wal_->sync()) {
     failed_.store(true, std::memory_order_release);
@@ -60,24 +62,23 @@ bool Persistence::sync() noexcept {
   return true;
 }
 
-bool Persistence::close() noexcept {
+bool detail::PersistenceCore::close() noexcept {
   if (!physical_wal_) return true;
   const bool closed = physical_wal_->close();
   physical_wal_.reset();
   return closed;
 }
 
-bool Persistence::is_open() const noexcept {
+bool detail::PersistenceCore::is_open() const noexcept {
   return physical_wal_ && physical_wal_->is_open();
 }
 
-bool Persistence::failed() const noexcept {
+bool detail::PersistenceCore::failed() const noexcept {
   return failed_.load(std::memory_order_acquire);
 }
 
-SliderResult Persistence::process_available() noexcept {
+SliderResult detail::PersistenceCore::process_until(Position available_end) noexcept {
   Position current = GetFrontier();
-  const Position available_end = source_.head();
   if (available_end < current) {
     return {SliderStatus::UpstreamRegression, current, 0};
   }
@@ -111,15 +112,15 @@ SliderResult Persistence::process_available() noexcept {
   return {SliderStatus::Processed, current, processed_count};
 }
 
-Position Persistence::GetFrontier() const noexcept {
+Position detail::PersistenceCore::GetFrontier() const noexcept {
   return frontier_.load(std::memory_order_acquire);
 }
 
-void Persistence::reset_quiescent(Position initial) noexcept {
+void detail::PersistenceCore::reset_quiescent(Position initial) noexcept {
   frontier_.store(initial, std::memory_order_relaxed);
 }
 
-void Persistence::publish(Position end) noexcept {
+void detail::PersistenceCore::publish(Position end) noexcept {
   frontier_.store(end, std::memory_order_release);
 }
 

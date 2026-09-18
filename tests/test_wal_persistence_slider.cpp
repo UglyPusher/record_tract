@@ -36,6 +36,17 @@ public:
   PhysicalControlGuard& operator=(const PhysicalControlGuard&) = delete;
 };
 
+class TestPredecessor final {
+public:
+  explicit TestPredecessor(const Position& frontier) noexcept
+      : frontier_(frontier) {}
+
+  [[nodiscard]] Position GetFrontier() const noexcept { return frontier_; }
+
+private:
+  const Position& frontier_;
+};
+
 [[nodiscard]] std::filesystem::path test_path(const char* name) {
   return std::filesystem::temp_directory_path() / name;
 }
@@ -74,7 +85,9 @@ constexpr PhysicalWalConfig physical_config{
     wal_config.stream_id,              wal_config.epoch_id,
     wal_config.first_sequence,         wal_config.manifest_id};
 
-[[nodiscard]] bool open(RecordTape& tape, Persistence& persistence,
+template <class Predecessor>
+[[nodiscard]] bool open(RecordTape& tape,
+                        Persistence<Predecessor>& persistence,
                         const std::filesystem::path& path) {
   return tape.open({wal_config.payload_size, wal_config.capacity,
                    wal_config.alignment})
@@ -92,13 +105,13 @@ constexpr PhysicalWalConfig physical_config{
   std::filesystem::remove(path);
 
   RecordTape tape;
-  Persistence persistence(tape, PersistencePolicy{2});
+  Persistence persistence(tape, tape, PersistencePolicy{2});
   if (!open(tape, persistence, path)) return false;
   for (std::uint64_t value = 0; value < 5; ++value) {
     if (!publish(tape, value)) return false;
   }
 
-  Persistence& persistence_slider = persistence;
+  auto& persistence_slider = persistence;
   NoOpModule no_op;
   Slider no_op_slider(tape, persistence_slider, no_op);
 
@@ -163,7 +176,7 @@ constexpr PhysicalWalConfig physical_config{
   const auto path = test_path(name);
   std::filesystem::remove(path);
   RecordTape tape;
-  Persistence persistence(tape, policy);
+  Persistence persistence(tape, tape, policy);
   if (!open(tape, persistence, path) || !publish(tape, 0) ||
       !publish(tape, 1)) {
     return false;
@@ -189,7 +202,7 @@ constexpr PhysicalWalConfig physical_config{
   const auto path = test_path("fexma_wal_persistence_policy_eight.wal");
   std::filesystem::remove(path);
   RecordTape tape;
-  Persistence persistence(tape, PersistencePolicy{8});
+  Persistence persistence(tape, tape, PersistencePolicy{8});
   if (!tape.open({wal_config.payload_size, 32, wal_config.alignment}).ok() ||
       !persistence.open(path, physical_config).ok()) {
     return false;
@@ -222,11 +235,11 @@ constexpr PhysicalWalConfig physical_config{
   std::filesystem::remove(path);
 
   RecordTape tape;
-  Persistence persistence(tape, PersistencePolicy{2});
+  Persistence persistence(tape, tape, PersistencePolicy{2});
   if (!open(tape, persistence, path) || !publish(tape, 0) || !publish(tape, 1)) {
     return false;
   }
-  Persistence& slider = persistence;
+  auto& slider = persistence;
 
   detail::PhysicalWalFileTestControl control{};
   control.fail_append_call = 0;
@@ -247,10 +260,10 @@ constexpr PhysicalWalConfig physical_config{
   std::filesystem::remove(path);
 
   RecordTape tape;
-  Persistence persistence(tape, PersistencePolicy{2});
+  Persistence persistence(tape, tape, PersistencePolicy{2});
   if (!open(tape, persistence, path) || !publish(tape, 0)) return false;
 
-  Persistence& persistence_slider = persistence;
+  auto& persistence_slider = persistence;
   NoOpModule no_op;
   Slider no_op_slider(tape, persistence_slider, no_op);
 
@@ -291,6 +304,36 @@ constexpr PhysicalWalConfig physical_config{
   return valid;
 }
 
+[[nodiscard]] bool obeys_supplied_predecessor_frontier() {
+  const auto path = test_path("fexma_wal_persistence_predecessor.wal");
+  std::filesystem::remove(path);
+
+  RecordTape tape;
+  Position permitted_end = 2;
+  const TestPredecessor predecessor(permitted_end);
+  Persistence persistence(tape, predecessor, PersistencePolicy{8});
+  if (!open(tape, persistence, path)) return false;
+  for (std::uint64_t value = 0; value < 5; ++value) {
+    if (!publish(tape, value)) return false;
+  }
+
+  const SliderResult first = persistence.process_available();
+  if (tape.head() != 5 || first.status != SliderStatus::Processed ||
+      first.processed_count != 2 || persistence.GetFrontier() != 2) {
+    return false;
+  }
+
+  permitted_end = 5;
+  const SliderResult second = persistence.process_available();
+  const bool valid = second.status == SliderStatus::Processed &&
+                     second.processed_count == 3 &&
+                     persistence.GetFrontier() == 5;
+  (void)persistence.close();
+  tape.close();
+  std::filesystem::remove(path);
+  return valid;
+}
+
 } // namespace
 
 int main() {
@@ -301,8 +344,9 @@ int main() {
           PersistencePolicy{0}, "fexma_wal_persistence_zero.wal"))
     return 2;
   if (!sync_policy_eight_drains_twenty_three()) return 3;
-  if (!batches_sync_then_release_downstream()) return 4;
-  if (!append_failure_does_not_publish()) return 5;
-  if (!sync_failure_hides_batch_but_durable_prefix_drains()) return 6;
+  if (!obeys_supplied_predecessor_frontier()) return 4;
+  if (!batches_sync_then_release_downstream()) return 5;
+  if (!append_failure_does_not_publish()) return 6;
+  if (!sync_failure_hides_batch_but_durable_prefix_drains()) return 7;
   return 0;
 }

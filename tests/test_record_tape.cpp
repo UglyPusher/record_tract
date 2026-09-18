@@ -60,7 +60,7 @@ using Payload = std::array<std::byte, 16>;
   constexpr WalConfig expected{16, 7, 64, 23, StreamKind::Command,
                                41, 43, 101, 47};
   RecordTape tape;
-  Persistence persistence(tape, PersistencePolicy{3});
+  Persistence persistence(tape, tape, PersistencePolicy{3});
   if (!tape.open({expected.payload_size, expected.capacity,
                   expected.alignment})
            .ok() ||
