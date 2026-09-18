@@ -100,6 +100,42 @@ template <class Predecessor>
   return tape.try_publish(std::span<const std::byte>{bytes}).ok();
 }
 
+[[nodiscard]] bool tape_and_persistence_have_independent_lifecycles() {
+  const auto path = test_path("fexma_wal_split_lifecycle.wal");
+  std::filesystem::remove(path);
+
+  RecordTape tape;
+  Persistence persistence(tape, tape, PersistencePolicy{3});
+  if (!open(tape, persistence, path)) return false;
+
+  for (Position position = 0; position < 3; ++position) {
+    if (!publish(tape, position)) return false;
+  }
+  if (persistence.process_available().status != SliderStatus::Processed ||
+      !persistence.close() || persistence.failed()) {
+    return false;
+  }
+
+  // Runtime storage remains open and readable after persistence closes.
+  if (!tape.is_open() || !tape.try_view(2).ok()) return false;
+  tape.close();
+
+  WalReader reader;
+  if (!reader.open(path, wal_config).ok()) return false;
+  Payload bytes{};
+  for (Position position = 0; position < 3; ++position) {
+    const ReadResult read = reader.read_next(bytes);
+    if (!read.ok() || read.sequence != wal_config.first_sequence + position ||
+        bytes != payload(position)) {
+      return false;
+    }
+  }
+  const bool valid = reader.read_next(bytes).status == ReadStatus::EndOfLog &&
+                     reader.close();
+  std::filesystem::remove(path);
+  return valid;
+}
+
 [[nodiscard]] bool batches_sync_then_release_downstream() {
   const auto path = test_path("fexma_wal_persistence_slider_batches.wal");
   std::filesystem::remove(path);
@@ -348,5 +384,6 @@ int main() {
   if (!batches_sync_then_release_downstream()) return 5;
   if (!append_failure_does_not_publish()) return 6;
   if (!sync_failure_hides_batch_but_durable_prefix_drains()) return 7;
+  if (!tape_and_persistence_have_independent_lifecycles()) return 8;
   return 0;
 }

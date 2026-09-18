@@ -36,9 +36,21 @@ endif()
 
 add_test(NAME test_binary_little_endian COMMAND test_binary_little_endian)
 
+add_library(fexma_record_tract STATIC
+  src/record_tape.cpp
+)
+
+add_library(fexma::record_tract ALIAS fexma_record_tract)
+
+target_include_directories(fexma_record_tract
+  PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_compile_features(fexma_record_tract PUBLIC cxx_std_20)
+
 add_library(fexma_wal STATIC
   src/config.cpp
-  src/record_tape.cpp
   src/persistence.cpp
   src/physical_wal_file.cpp
   src/reader.cpp
@@ -53,7 +65,12 @@ target_include_directories(fexma_wal
 )
 
 target_compile_features(fexma_wal PUBLIC cxx_std_20)
-target_link_libraries(fexma_wal PRIVATE fexma::binary)
+target_link_libraries(fexma_wal
+  PUBLIC
+    fexma::record_tract
+  PRIVATE
+    fexma::binary
+)
 
 function(fexma_wal_apply_warnings target_name)
   if(MSVC)
@@ -74,6 +91,7 @@ function(fexma_wal_apply_warnings target_name)
   endif()
 endfunction()
 
+fexma_wal_apply_warnings(fexma_record_tract)
 fexma_wal_apply_warnings(fexma_wal)
 
 add_executable(test_wal_reader tests/test_wal_reader.cpp)
@@ -88,17 +106,17 @@ fexma_wal_apply_warnings(test_wal_recovery)
 add_test(NAME test_wal_recovery COMMAND test_wal_recovery)
 
 add_executable(test_record_tape tests/test_record_tape.cpp)
-target_link_libraries(test_record_tape PRIVATE fexma::wal)
+target_link_libraries(test_record_tape PRIVATE fexma::record_tract)
 fexma_wal_apply_warnings(test_record_tape)
 add_test(NAME test_record_tape COMMAND test_record_tape)
 
 add_executable(test_wal_slider tests/test_wal_slider.cpp)
-target_link_libraries(test_wal_slider PRIVATE fexma::wal)
+target_link_libraries(test_wal_slider PRIVATE fexma::record_tract)
 fexma_wal_apply_warnings(test_wal_slider)
 add_test(NAME test_wal_slider COMMAND test_wal_slider)
 
 add_executable(test_wal_bare_pipeline tests/test_wal_bare_pipeline.cpp)
-target_link_libraries(test_wal_bare_pipeline PRIVATE fexma::wal)
+target_link_libraries(test_wal_bare_pipeline PRIVATE fexma::record_tract)
 fexma_wal_apply_warnings(test_wal_bare_pipeline)
 add_test(NAME test_wal_bare_pipeline COMMAND test_wal_bare_pipeline)
 

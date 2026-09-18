@@ -4,8 +4,6 @@
  */
 
 #include <fexma/wal/record_tape.hpp>
-#include <fexma/wal/persistence.hpp>
-#include <fexma/wal/reader.hpp>
 
 #include <array>
 #include <atomic>
@@ -51,54 +49,6 @@ using Payload = std::array<std::byte, 16>;
          tape.try_publish(payload(0)).status == PublishStatus::Closed &&
          tape.try_view(0).status == ViewStatus::Closed &&
          tape.reclaim(0) == ReclaimStatus::Closed;
-}
-
-[[nodiscard]] bool tape_and_persistence_have_independent_lifecycles() {
-  const auto path = std::filesystem::temp_directory_path() /
-                    "fexma_wal_split_lifecycle.wal";
-  std::filesystem::remove(path);
-  constexpr WalConfig expected{16, 7, 64, 23, StreamKind::Command,
-                               41, 43, 101, 47};
-  RecordTape tape;
-  Persistence persistence(tape, tape, PersistencePolicy{3});
-  if (!tape.open({expected.payload_size, expected.capacity,
-                  expected.alignment})
-           .ok() ||
-      !persistence
-           .open(path, {expected.payload_size, expected.alignment,
-                        expected.payload_schema_version, expected.stream_kind,
-                        expected.stream_id, expected.epoch_id,
-                        expected.first_sequence, expected.manifest_id})
-           .ok()) {
-    return false;
-  }
-
-  for (Position position = 0; position < 3; ++position) {
-    if (!tape.try_publish(payload(position)).ok()) return false;
-  }
-  if (persistence.process_available().status != SliderStatus::Processed ||
-      !persistence.close() || persistence.failed()) {
-    return false;
-  }
-
-  // Runtime storage remains open and readable after persistence closes.
-  if (!tape.is_open() || !tape.try_view(2).ok()) return false;
-  tape.close();
-
-  WalReader reader;
-  if (!reader.open(path, expected).ok()) return false;
-  Payload bytes{};
-  for (Position position = 0; position < 3; ++position) {
-    const ReadResult read = reader.read_next(bytes);
-    if (!read.ok() || read.sequence != expected.first_sequence + position ||
-        bytes != payload(position)) {
-      return false;
-    }
-  }
-  const bool valid = reader.read_next(bytes).status == ReadStatus::EndOfLog &&
-                     reader.close();
-  std::filesystem::remove(path);
-  return valid;
 }
 
 [[nodiscard]] bool reclaims_only_valid_absolute_ranges() {
@@ -195,8 +145,7 @@ using Payload = std::array<std::byte, 16>;
 
 int main() {
   if (!opens_without_physical_storage()) return 1;
-  if (!tape_and_persistence_have_independent_lifecycles()) return 2;
-  if (!reclaims_only_valid_absolute_ranges()) return 3;
-  if (!producer_and_reclaimer_wrap_concurrently()) return 4;
+  if (!reclaims_only_valid_absolute_ranges()) return 2;
+  if (!producer_and_reclaimer_wrap_concurrently()) return 3;
   return 0;
 }
