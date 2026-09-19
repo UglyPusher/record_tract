@@ -3,8 +3,8 @@
  * @brief Sequential and concurrent proof of the bare WAL slider pipeline.
  */
 
-#include <fexma/wal/noop_module.hpp>
-#include <fexma/wal/slider.hpp>
+#include <fexma/record_tract/noop_module.hpp>
+#include <fexma/record_tract/slider.hpp>
 
 #include <array>
 #include <atomic>

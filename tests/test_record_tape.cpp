@@ -3,7 +3,7 @@
  * @brief Contract tests for the persistence-free bounded RecordTape.
  */
 
-#include <fexma/wal/record_tape.hpp>
+#include <fexma/record_tract/record_tape.hpp>
 
 #include <array>
 #include <atomic>

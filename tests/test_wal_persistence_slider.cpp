@@ -3,7 +3,7 @@
  * @brief Contract tests for persistence attached through the generic slider.
  */
 
-#include <fexma/wal/noop_module.hpp>
+#include <fexma/record_tract/noop_module.hpp>
 #include <fexma/wal/persistence.hpp>
 #include <fexma/wal/reader.hpp>
 

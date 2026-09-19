@@ -5,9 +5,9 @@
  * @brief Persistence mechanism over a RecordTape.
  */
 
-#include <fexma/wal/record_tape_types.hpp>
-#include <fexma/wal/record_tape.hpp>
-#include <fexma/wal/slider.hpp>
+#include <fexma/record_tract/record_tape_types.hpp>
+#include <fexma/record_tract/record_tape.hpp>
+#include <fexma/record_tract/slider.hpp>
 #include <fexma/wal/types.hpp>
 
 #include <atomic>

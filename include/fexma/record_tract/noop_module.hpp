@@ -5,7 +5,7 @@
  * @brief Trivial successful module for proving WAL slider composition.
  */
 
-#include <fexma/wal/record_tape_types.hpp>
+#include <fexma/record_tract/record_tape_types.hpp>
 
 namespace fexma::wal {
 

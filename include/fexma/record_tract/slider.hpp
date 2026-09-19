@@ -5,8 +5,8 @@
  * @brief Generic synchronous mechanics for a stage over RecordTape records.
  */
 
-#include <fexma/wal/record_tape.hpp>
-#include <fexma/wal/record_tape_types.hpp>
+#include <fexma/record_tract/record_tape.hpp>
+#include <fexma/record_tract/record_tape_types.hpp>
 
 #include <atomic>
 #include <algorithm>

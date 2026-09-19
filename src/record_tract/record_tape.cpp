@@ -3,7 +3,7 @@
  * @brief Bounded in-memory RecordTape implementation.
  */
 
-#include <fexma/wal/record_tape.hpp>
+#include <fexma/record_tract/record_tape.hpp>
 
 #include <cstring>
 #include <limits>
