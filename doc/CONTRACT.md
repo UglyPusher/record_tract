@@ -26,9 +26,10 @@ public:
 };
 ```
 
-RecordTape value types are declared in `record_tape_types.hpp`; physical WAL
-format and lifecycle types are declared in `types.hpp`. RecordTape headers do
-not depend on physical WAL definitions. Tape `default_alignment` and physical
+RecordTape value types are declared in
+`<fexma/record_tract/record_tape_types.hpp>`; physical WAL format and lifecycle
+types are declared in `<fexma/wal/types.hpp>`. RecordTape headers do not depend
+on physical WAL definitions. Tape `default_alignment` and physical
 `wal_default_alignment` are independent defaults even though both currently
 equal 64.
 
@@ -43,7 +44,8 @@ capacity, and allocation alignment.
 
 ## Progress Boundaries And Slider
 
-Ordinary stage mechanics are provided by `slider.hpp`:
+Ordinary stage mechanics are provided by
+`<fexma/record_tract/slider.hpp>`:
 
 ```cpp
 RecordTape tape;

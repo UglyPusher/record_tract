@@ -131,11 +131,12 @@ writes the file header, serializes physical records with CRC and padding,
 synchronizes when requested, and closes the handle. It has no knowledge of
 tract frontiers, predecessor topology, or batch-selection policy.
 
-`physical_wal_adapter.hpp` is the single compile-time selection point. The
-current build selects `PhysicalWalAdapter` from `physical_wal_file.hpp` and
-compiles `physical_wal_file.cpp`. `detail::PersistenceCore` uses that concrete
-type directly; there is no CRTP, runtime registry, virtual dispatch, or runtime
-backend selection.
+`src/wal/physical_wal_adapter.hpp` is the single compile-time selection point.
+The current build selects `PhysicalWalAdapter` from the private
+`src/wal/physical_wal_file.hpp` header and compiles
+`src/wal/physical_wal_file.cpp`. These headers are not part of the public
+include tree. `detail::PersistenceCore` uses that concrete type directly; there
+is no CRTP, runtime registry, virtual dispatch, or runtime backend selection.
 
 `WalReader` is the cold-path validated sequential reader. Its selected
 `PhysicalWalReaderAdapter` performs only hardware-specific byte reads;
@@ -209,9 +210,10 @@ and are not repeated in records. Zero padding fills the gap between the
 canonical file header and the first record so every record starts at an aligned
 offset.
 
-RecordTape public value types are isolated in `record_tape_types.hpp`.
-Physical format and lifecycle types are isolated in `types.hpp`; RecordTape
-does not include or depend on that header. `default_alignment` configures tape
+RecordTape public value types are isolated in
+`include/fexma/record_tract/record_tape_types.hpp`. Physical format and
+lifecycle types are isolated in `include/fexma/wal/types.hpp`; RecordTape does
+not include or depend on that header. `default_alignment` configures tape
 storage, while `wal_default_alignment` configures the physical layout. Their
 current equal value does not couple the contracts.
 

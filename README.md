@@ -25,6 +25,18 @@ target_link_libraries(core_consumer PRIVATE fexma::record_tract)
 target_link_libraries(wal_consumer PRIVATE fexma::wal)
 ```
 
+The source tree follows the same ownership boundary:
+
+```text
+include/fexma/record_tract/  Core public headers
+include/fexma/wal/           WAL, Reader, and Recovery public headers
+src/record_tract/            Core implementation
+src/wal/                     WAL implementation and private physical headers
+tests/core/                  Core-only tests
+tests/wal/                   WAL, Reader, and Recovery tests
+tests/binary/                Standalone binary-helper tests
+```
+
 ## Core Record Tract
 
 `RecordTape` owns only:
@@ -96,11 +108,12 @@ reclamation policy belong to the composition rather than to `RecordTape` or
 `NoOpModule` is the trivial always-successful module used to prove the minimal
 tract composition.
 
-RecordTape public value types live in `record_tape_types.hpp`; physical WAL
-format and lifecycle types live in `types.hpp`. RecordTape headers do not
-include the physical WAL types. The current RecordTape `default_alignment` and
-physical `wal_default_alignment` are both 64 but are independent defaults, not
-a shared contract.
+RecordTape public value types live in
+`<fexma/record_tract/record_tape_types.hpp>`; physical WAL format and lifecycle
+types live in `<fexma/wal/types.hpp>`. RecordTape headers do not include the
+physical WAL types. The current RecordTape `default_alignment` and physical
+`wal_default_alignment` are both 64 but are independent defaults, not a shared
+contract.
 
 ## Optional WAL Persistence
 
