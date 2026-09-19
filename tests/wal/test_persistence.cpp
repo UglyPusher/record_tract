@@ -1,5 +1,5 @@
 /**
- * @file test_wal_persistence_slider.cpp
+ * @file test_persistence.cpp
  * @brief Contract tests for persistence attached through the generic slider.
  */
 

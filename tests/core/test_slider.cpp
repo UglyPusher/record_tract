@@ -1,3 +1,8 @@
+/**
+ * @file test_slider.cpp
+ * @brief Contract tests for the generic Record Tract slider.
+ */
+
 #include <fexma/record_tract/slider.hpp>
 
 #include <array>

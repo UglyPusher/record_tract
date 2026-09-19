@@ -1,6 +1,6 @@
 /**
  * @file test_wal_bare_pipeline.cpp
- * @brief Sequential and concurrent proof of the bare WAL slider pipeline.
+ * @brief Sequential and concurrent proof of the bare Record Tract pipeline.
  */
 
 #include <fexma/record_tract/noop_module.hpp>
