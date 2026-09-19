@@ -1,5 +1,5 @@
 /**
- * @file test_wal_bare_pipeline.cpp
+ * @file test_bare_pipeline.cpp
  * @brief Sequential and concurrent proof of the bare Record Tract pipeline.
  */
 

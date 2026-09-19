@@ -94,6 +94,10 @@ endfunction()
 fexma_apply_warnings(fexma_record_tract)
 fexma_apply_warnings(fexma_wal)
 
+add_executable(example_basic_tract examples/basic_tract/main.cpp)
+target_link_libraries(example_basic_tract PRIVATE fexma::record_tract)
+fexma_apply_warnings(example_basic_tract)
+
 add_executable(test_wal_reader tests/wal/test_reader.cpp)
 target_link_libraries(test_wal_reader PRIVATE fexma::wal)
 fexma_apply_warnings(test_wal_reader)

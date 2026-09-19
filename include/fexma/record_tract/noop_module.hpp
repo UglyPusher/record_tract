@@ -2,7 +2,7 @@
 
 /**
  * @file noop_module.hpp
- * @brief Trivial successful module for proving WAL slider composition.
+ * @brief Trivial successful module for proving Core slider composition.
  */
 
 #include <fexma/record_tract/record_tape_types.hpp>
