@@ -21,6 +21,7 @@ public:
   void close() noexcept;
 
   Position head() const noexcept;
+  std::uint32_t payload_size() const noexcept;
   Position GetFrontier() const noexcept;
   Position tail() const noexcept;
 };
@@ -141,12 +142,19 @@ module frontier alone does not release storage or remove producer backpressure.
 
 ## Persistence Specialization
 
-`PhysicalWalConfig` contains persisted identity and physical layout fields and
-does not contain runtime capacity. Public Persistence is the independent
+`PhysicalWalConfig` contains persisted identity and physical layout fields but
+does not duplicate the source tape's `payload_size` or contain runtime capacity.
+Persistence derives the physical payload size from the already opened
+`RecordTape`. Public Persistence is the independent
 `Persistence<Predecessor>` tract mechanism; it is not a generic Slider paired
 with a persistence module. It receives a `RecordTape` as its record source and a
 predecessor as the source of its permitted boundary. A root Persistence may use
 the same tape as both source and predecessor.
+
+`Persistence::open()` requires the source `RecordTape` to be already open and
+configured. The physical WAL payload size is derived from
+`RecordTape::payload_size()`; it is not supplied independently through
+`PhysicalWalConfig`.
 
 ```cpp
 struct PersistencePolicy final {
@@ -193,8 +201,12 @@ from `predecessor.GetFrontier()`.
 it selects a bounded batch, appends every selected record, synchronizes the
 complete batch once, and only then publishes its owner-held frontier. In a
 persistence composition that frontier is conventionally named `durable`.
-Append or sync failure leaves durable progress unchanged and is terminal for
-the current open writer lifetime.
+Append, sync, or physical sequence exhaustion leaves durable progress unchanged
+and puts Persistence into its terminal failed state for the current open writer
+lifetime. Once failed, every subsequent `process()` returns `ModuleFailed`,
+including when there is no pending upstream work; it performs no further append
+or synchronization. Lifecycle misuse is a separate precondition violation and
+does not establish the failed state.
 
 `detail::PersistenceCore` implements the non-template mechanics behind the
 public template. It owns the current policy, durable progress atomic, terminal
@@ -413,8 +425,12 @@ Physical synchronization is `FlushFileBuffers` on Windows, `fdatasync` on
 POSIX, and `fsync` on macOS. Creating a file also synchronizes its initial
 header; POSIX creation additionally synchronizes the parent directory entry.
 
-Append or sync failure leaves `durable` unchanged and puts Persistence into its
-terminal failed state for the current open writer lifetime. On sync failure,
+Append, sync, or physical sequence exhaustion leaves `durable` unchanged and
+puts Persistence into its terminal failed state for the current open writer
+lifetime. Once failed, every subsequent `process()` returns `ModuleFailed`,
+including when there is no pending upstream work; it performs no further append
+or synchronization. Lifecycle misuse is a separate precondition violation and
+does not establish the failed state. On sync failure,
 records from the failed batch may already have been appended to the physical
 file; there is no rollback or truncation in the live writer. Those records
 remain invisible to downstream runtime stages because `durable` is not

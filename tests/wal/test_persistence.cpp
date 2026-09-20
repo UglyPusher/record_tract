@@ -73,8 +73,8 @@ constexpr WalConfig wal_config{static_cast<std::uint32_t>(sizeof(Payload)),
                                12};
 
 constexpr PhysicalWalConfig physical_config{
-    wal_config.payload_size,           wal_config.alignment,
-    wal_config.payload_schema_version, wal_config.stream_kind,
+    wal_config.alignment,              wal_config.payload_schema_version,
+    wal_config.stream_kind,
     wal_config.stream_id,              wal_config.epoch_id,
     wal_config.first_sequence,         wal_config.manifest_id};
 
@@ -277,12 +277,51 @@ constexpr PhysicalWalConfig physical_config{
   control.fail_append_call = 0;
   PhysicalControlGuard guard(control);
   const SliderStatus failed = slider.process();
+  const std::uint32_t append_calls = control.append_calls;
+  const std::uint32_t sync_calls = control.sync_calls;
+  const SliderStatus repeated = slider.process();
   const bool valid = failed == SliderStatus::ModuleFailed &&
+                     repeated == SliderStatus::ModuleFailed &&
                      slider.current() == 0 &&
                      read_frontier(slider.GetFrontier()) == 0 &&
                      persistence.failed() &&
-                     control.append_calls == 1 && control.sync_calls == 0;
+                     control.append_calls == append_calls &&
+                     control.sync_calls == sync_calls && append_calls == 1 &&
+                     sync_calls == 0;
   (void)persistence.close();
+  tape.close();
+  std::filesystem::remove(path);
+  return valid;
+}
+
+[[nodiscard]] bool sticky_failure_precedes_empty_result() {
+  const auto path = test_path("fexma_wal_persistence_sticky_failure.wal");
+  std::filesystem::remove(path);
+
+  RecordTape tape;
+  detail::PersistenceCore core(tape, PersistencePolicy{});
+  tape.SetTailRef(core.GetFrontier());
+  if (tape.open({wal_config.payload_size, wal_config.capacity,
+                 wal_config.alignment}) != RecordTapeOpenStatus::Ok ||
+      !core.open(path, physical_config).ok() || !publish(tape, 0)) {
+    return false;
+  }
+
+  detail::PhysicalWalFileTestControl control{};
+  control.fail_append_call = 0;
+  PhysicalControlGuard guard(control);
+  const SliderStatus failed = core.process_until(1);
+  const std::uint32_t append_calls = control.append_calls;
+  const std::uint32_t sync_calls = control.sync_calls;
+  const SliderStatus empty = core.process_until(
+      read_frontier(core.GetFrontier()));
+  const bool valid = failed == SliderStatus::ModuleFailed &&
+                     empty == SliderStatus::ModuleFailed && core.failed() &&
+                     read_frontier(core.GetFrontier()) == 0 &&
+                     control.append_calls == append_calls &&
+                     control.sync_calls == sync_calls && append_calls == 1 &&
+                     sync_calls == 0;
+  (void)core.close();
   tape.close();
   std::filesystem::remove(path);
   return valid;
@@ -323,6 +362,14 @@ constexpr PhysicalWalConfig physical_config{
       read_frontier(persistence_slider.GetFrontier()) != 1 ||
       !persistence.failed() || failure_control.append_calls != 2 ||
       failure_control.sync_calls != 1) {
+    return false;
+  }
+
+  const std::uint32_t append_calls = failure_control.append_calls;
+  const std::uint32_t sync_calls = failure_control.sync_calls;
+  if (persistence_slider.process() != SliderStatus::ModuleFailed ||
+      failure_control.append_calls != append_calls ||
+      failure_control.sync_calls != sync_calls) {
     return false;
   }
 
@@ -376,7 +423,8 @@ int main() {
   if (!obeys_supplied_upstream_frontier()) return 4;
   if (!batches_sync_then_release_downstream()) return 5;
   if (!append_failure_does_not_publish()) return 6;
-  if (!sync_failure_hides_batch_but_durable_prefix_drains()) return 7;
-  if (!tape_and_persistence_have_independent_lifecycles()) return 8;
+  if (!sticky_failure_precedes_empty_result()) return 7;
+  if (!sync_failure_hides_batch_but_durable_prefix_drains()) return 8;
+  if (!tape_and_persistence_have_independent_lifecycles()) return 9;
   return 0;
 }

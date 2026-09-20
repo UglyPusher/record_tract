@@ -46,8 +46,8 @@ payload(std::uint64_t value) noexcept {
     return false;
   }
   const PhysicalWalConfig physical_config{
-      config.payload_size,           config.alignment,
-      config.payload_schema_version, config.stream_kind,
+      config.alignment,              config.payload_schema_version,
+      config.stream_kind,
       config.stream_id,              config.epoch_id,
       config.first_sequence,         config.manifest_id};
   if (!persistence.open(path, physical_config).ok()) {

@@ -56,6 +56,9 @@ public:
 
   [[nodiscard]] bool is_open() const noexcept;
   [[nodiscard]] Position head() const noexcept;
+  [[nodiscard]] std::uint32_t payload_size() const noexcept {
+    return payload_size_;
+  }
   [[nodiscard]] const Frontier& GetFrontier() const noexcept {
     return head_boundary_.value;
   }

@@ -17,7 +17,6 @@
 namespace fexma::wal {
 
 struct PhysicalWalConfig {
-  std::uint32_t payload_size{};
   std::uint32_t alignment{wal_default_alignment};
   std::uint32_t payload_schema_version{};
   StreamKind stream_kind{StreamKind::Generic};

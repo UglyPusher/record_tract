@@ -26,9 +26,10 @@ detail::PersistenceCore::~PersistenceCore() { (void)close(); }
 OpenResult detail::PersistenceCore::open(
     const std::filesystem::path& path,
     const PhysicalWalConfig& config) noexcept {
+  assert(source_.is_open());
   if (is_open()) return {OpenStatus::AlreadyOpen};
   const WalConfig adapter_config{
-      config.payload_size, 1, config.alignment, config.payload_schema_version,
+      source_.payload_size(), 1, config.alignment, config.payload_schema_version,
       config.stream_kind, config.stream_id, config.epoch_id,
       config.first_sequence, config.manifest_id};
   if (!valid_config(adapter_config)) return {OpenStatus::InvalidConfig};
@@ -46,8 +47,13 @@ OpenResult detail::PersistenceCore::open(
 }
 
 bool detail::PersistenceCore::append(const RecordView& record) noexcept {
-  if (!is_open() || failed_.load(std::memory_order_acquire) ||
-      record.position > std::numeric_limits<std::uint64_t>::max() -
+  if (!is_open()) [[unlikely]] {
+    std::terminate();
+  }
+  if (failed_.load(std::memory_order_acquire)) {
+    return false;
+  }
+  if (record.position > std::numeric_limits<std::uint64_t>::max() -
                             first_sequence_ ||
       !physical_wal_->append_record(first_sequence_ + record.position,
                                     record.payload)) {
@@ -58,8 +64,13 @@ bool detail::PersistenceCore::append(const RecordView& record) noexcept {
 }
 
 bool detail::PersistenceCore::sync() noexcept {
-  if (!is_open() || failed_.load(std::memory_order_acquire) ||
-      !physical_wal_->sync()) {
+  if (!is_open()) [[unlikely]] {
+    std::terminate();
+  }
+  if (failed_.load(std::memory_order_acquire)) {
+    return false;
+  }
+  if (!physical_wal_->sync()) {
     failed_.store(true, std::memory_order_release);
     return false;
   }
@@ -82,6 +93,9 @@ bool detail::PersistenceCore::failed() const noexcept {
 }
 
 SliderStatus detail::PersistenceCore::process_until(Position available_end) noexcept {
+  if (failed_.load(std::memory_order_acquire)) {
+    return SliderStatus::ModuleFailed;
+  }
   Position current =
       GetFrontier().load(std::memory_order_acquire);
   if (available_end < current) [[unlikely]] {
