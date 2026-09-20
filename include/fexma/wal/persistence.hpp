@@ -11,7 +11,6 @@
 #include <fexma/wal/types.hpp>
 
 #include <atomic>
-#include <concepts>
 #include <filesystem>
 #include <memory>
 
@@ -48,7 +47,7 @@ public:
   [[nodiscard]] bool is_open() const noexcept;
   [[nodiscard]] bool failed() const noexcept;
   [[nodiscard]] SliderResult process_until(Position available_end) noexcept;
-  [[nodiscard]] Position GetFrontier() const noexcept;
+  [[nodiscard]] const Frontier& GetFrontier() const noexcept;
   void reset_quiescent(Position initial) noexcept;
 
 private:
@@ -61,21 +60,15 @@ private:
   std::uint64_t first_sequence_{};
   std::atomic<bool> failed_{false};
   const PersistencePolicy policy_;
-  alignas(64) std::atomic<Position> frontier_{};
+  alignas(64) Frontier frontier_{};
 };
 } // namespace detail
 
-template <class Predecessor>
 class Persistence final {
 public:
-  Persistence(const RecordTape& source, const Predecessor& predecessor,
+  Persistence(const RecordTape& source, const Frontier& upstream_frontier,
               PersistencePolicy policy = {}) noexcept
-      : predecessor_(predecessor), core_(source, policy) {}
-
-  explicit Persistence(const RecordTape& source,
-                       PersistencePolicy policy = {}) noexcept
-      requires std::same_as<Predecessor, RecordTape>
-      : Persistence(source, source, policy) {}
+      : upstream_frontier_(&upstream_frontier), core_(source, policy) {}
 
   ~Persistence() = default;
 
@@ -93,23 +86,23 @@ public:
   [[nodiscard]] bool failed() const noexcept { return core_.failed(); }
 
   [[nodiscard]] SliderResult process_available() noexcept {
-    return core_.process_until(predecessor_.GetFrontier());
+    const Position available_end =
+        upstream_frontier_->load(std::memory_order_acquire);
+    return core_.process_until(available_end);
   }
-  [[nodiscard]] Position GetFrontier() const noexcept {
+  [[nodiscard]] const Frontier& GetFrontier() const noexcept {
     return core_.GetFrontier();
   }
-  [[nodiscard]] Position current() const noexcept { return GetFrontier(); }
+  [[nodiscard]] Position current() const noexcept {
+    return GetFrontier().load(std::memory_order_acquire);
+  }
   void reset_quiescent(Position initial) noexcept {
     core_.reset_quiescent(initial);
   }
 
 private:
-  const Predecessor& predecessor_;
+  const Frontier* upstream_frontier_;
   detail::PersistenceCore core_;
 };
-
-Persistence(const RecordTape&) -> Persistence<RecordTape>;
-
-Persistence(const RecordTape&, PersistencePolicy) -> Persistence<RecordTape>;
 
 } // namespace fexma::wal

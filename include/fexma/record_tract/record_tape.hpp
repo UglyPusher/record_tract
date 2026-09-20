@@ -71,14 +71,16 @@ public:
 
   [[nodiscard]] bool is_open() const noexcept;
   [[nodiscard]] Position head() const noexcept;
-  [[nodiscard]] Position GetFrontier() const noexcept { return head(); }
+  [[nodiscard]] const Frontier& GetFrontier() const noexcept {
+    return head_boundary_.value;
+  }
   [[nodiscard]] Position tail() const noexcept;
 
 private:
   static constexpr std::size_t cache_line_size = 64;
 
   struct alignas(cache_line_size) TapeBoundary {
-    std::atomic<Position> value{0};
+    Frontier value{};
   };
 
   static_assert(std::atomic<Position>::is_always_lock_free);

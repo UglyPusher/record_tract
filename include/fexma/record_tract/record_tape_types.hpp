@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
 #include <span>
 
 namespace fexma::wal {
@@ -16,6 +17,7 @@ namespace fexma::wal {
 inline constexpr std::uint32_t default_alignment = 64;
 
 using Position = std::uint64_t; // Absolute zero-based RecordTape position.
+using Frontier = std::atomic<Position>;
 
 enum class ViewStatus : std::uint8_t {
   Ok,

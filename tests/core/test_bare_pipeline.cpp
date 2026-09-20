@@ -17,6 +17,10 @@ using namespace fexma::wal;
 
 namespace {
 
+[[nodiscard]] Position read_frontier(const Frontier& frontier) noexcept {
+  return frontier.load(std::memory_order_acquire);
+}
+
 using Payload = std::array<std::byte, 16>;
 
 [[nodiscard]] Payload payload(Position position) noexcept {
@@ -67,29 +71,29 @@ using Payload = std::array<std::byte, 16>;
   }
 
   NoOpModule module;
-  Slider slider(tape, module);
+  Slider slider(tape, tape.GetFrontier(), module);
 
   const SliderResult processed = slider.process_available();
   if (processed.status != SliderStatus::Processed ||
       processed.processed_count != capacity ||
-      slider.GetFrontier() != capacity || tape.tail() != 0 ||
+      read_frontier(slider.GetFrontier()) != capacity || tape.tail() != 0 ||
       tape.try_publish(std::span<const std::byte>{blocked_payload}).status !=
           PublishStatus::Full) {
     return false;
   }
 
-  if (tape.reclaim(slider.GetFrontier()) != ReclaimStatus::Ok ||
+  if (tape.reclaim(read_frontier(slider.GetFrontier())) != ReclaimStatus::Ok ||
       !publish(tape, capacity)) {
     return false;
   }
   const SliderResult wrapped = slider.process_available();
   if (!wrapped.ok() || wrapped.current != capacity + 1 ||
-      tape.reclaim(slider.GetFrontier()) != ReclaimStatus::Ok) {
+      tape.reclaim(read_frontier(slider.GetFrontier())) != ReclaimStatus::Ok) {
     return false;
   }
 
   return tape.tail() == capacity + 1 &&
-         slider.GetFrontier() == tape.tail() &&
+         read_frontier(slider.GetFrontier()) == tape.tail() &&
          tape.head() == tape.tail();
 }
 
@@ -107,7 +111,7 @@ using Payload = std::array<std::byte, 16>;
   const std::byte* const first_address = before.record.payload.data();
 
   NoOpModule module;
-  Slider slider(tape, module);
+  Slider slider(tape, tape.GetFrontier(), module);
   if (!slider.process_available().ok()) return false;
 
   const AccessResult retained = tape.try_view(0);
@@ -131,8 +135,8 @@ using Payload = std::array<std::byte, 16>;
   }
 
   if (!slider.process_available().ok() ||
-      slider.GetFrontier() != 3 ||
-      tape.reclaim(slider.GetFrontier()) != ReclaimStatus::Ok) {
+      read_frontier(slider.GetFrontier()) != 3 ||
+      tape.reclaim(read_frontier(slider.GetFrontier())) != ReclaimStatus::Ok) {
     return false;
   }
   return tape.tail() == 3 && tape.head() == 3;
@@ -171,7 +175,7 @@ private:
   }
 
   OrderedProbeModule module;
-  Slider slider(tape, module);
+  Slider slider(tape, tape.GetFrontier(), module);
   std::atomic<bool> failed{false};
   std::atomic<bool> producer_done{false};
 
@@ -202,7 +206,7 @@ private:
       if (failed.load(std::memory_order_acquire)) return;
       const SliderResult result = slider.process_available();
       if (result.status == SliderStatus::Processed) {
-        const Position published = slider.GetFrontier();
+        const Position published = read_frontier(slider.GetFrontier());
         if (published != slider.current() || published > tape.head() ||
             tape.reclaim(published) != ReclaimStatus::Ok) {
           failed.store(true, std::memory_order_release);
@@ -227,7 +231,7 @@ private:
 
   return !failed.load(std::memory_order_acquire) && module.valid() &&
          module.count() == message_count && tape.tail() == message_count &&
-      slider.GetFrontier() == message_count &&
+      read_frontier(slider.GetFrontier()) == message_count &&
          tape.head() == message_count;
 }
 

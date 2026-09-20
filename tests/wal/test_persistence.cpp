@@ -21,6 +21,10 @@ namespace {
 
 using Payload = std::array<std::byte, 8>;
 
+[[nodiscard]] Position read_frontier(const Frontier& frontier) noexcept {
+  return frontier.load(std::memory_order_acquire);
+}
+
 class PhysicalControlGuard final {
 public:
   explicit PhysicalControlGuard(
@@ -34,17 +38,6 @@ public:
 
   PhysicalControlGuard(const PhysicalControlGuard&) = delete;
   PhysicalControlGuard& operator=(const PhysicalControlGuard&) = delete;
-};
-
-class TestPredecessor final {
-public:
-  explicit TestPredecessor(const Position& frontier) noexcept
-      : frontier_(frontier) {}
-
-  [[nodiscard]] Position GetFrontier() const noexcept { return frontier_; }
-
-private:
-  const Position& frontier_;
 };
 
 [[nodiscard]] std::filesystem::path test_path(const char* name) {
@@ -85,9 +78,8 @@ constexpr PhysicalWalConfig physical_config{
     wal_config.stream_id,              wal_config.epoch_id,
     wal_config.first_sequence,         wal_config.manifest_id};
 
-template <class Predecessor>
 [[nodiscard]] bool open(RecordTape& tape,
-                        Persistence<Predecessor>& persistence,
+                        Persistence& persistence,
                         const std::filesystem::path& path) {
   return tape.open({wal_config.payload_size, wal_config.capacity,
                    wal_config.alignment})
@@ -105,7 +97,7 @@ template <class Predecessor>
   std::filesystem::remove(path);
 
   RecordTape tape;
-  Persistence persistence(tape, tape, PersistencePolicy{3});
+  Persistence persistence(tape, tape.GetFrontier(), PersistencePolicy{3});
   if (!open(tape, persistence, path)) return false;
 
   for (Position position = 0; position < 3; ++position) {
@@ -141,7 +133,7 @@ template <class Predecessor>
   std::filesystem::remove(path);
 
   RecordTape tape;
-  Persistence persistence(tape, tape, PersistencePolicy{2});
+  Persistence persistence(tape, tape.GetFrontier(), PersistencePolicy{2});
   if (!open(tape, persistence, path)) return false;
   for (std::uint64_t value = 0; value < 5; ++value) {
     if (!publish(tape, value)) return false;
@@ -149,37 +141,40 @@ template <class Predecessor>
 
   auto& persistence_slider = persistence;
   NoOpModule no_op;
-  Slider no_op_slider(tape, persistence_slider, no_op);
+  Slider no_op_slider(tape, persistence_slider.GetFrontier(), no_op);
 
   detail::PhysicalWalFileTestControl control{};
   PhysicalControlGuard guard(control);
 
   const SliderResult first = persistence_slider.process_available();
   if (!first.ok() || first.processed_count != 2 ||
-      persistence_slider.GetFrontier() != 2 || control.append_calls != 2 ||
+      read_frontier(persistence_slider.GetFrontier()) != 2 ||
+      control.append_calls != 2 ||
       control.sync_calls != 1 || !no_op_slider.process_available().ok() ||
-      no_op_slider.GetFrontier() != 2 ||
-      tape.reclaim(no_op_slider.GetFrontier()) != ReclaimStatus::Ok) {
+      read_frontier(no_op_slider.GetFrontier()) != 2 ||
+      tape.reclaim(read_frontier(no_op_slider.GetFrontier())) != ReclaimStatus::Ok) {
     return false;
   }
 
   const SliderResult second = persistence_slider.process_available();
   if (!second.ok() || second.processed_count != 2 ||
-      persistence_slider.GetFrontier() != 4 || control.append_calls != 4 ||
+      read_frontier(persistence_slider.GetFrontier()) != 4 ||
+      control.append_calls != 4 ||
       control.sync_calls != 2 || !no_op_slider.process_available().ok() ||
-      no_op_slider.GetFrontier() != 4 ||
-      tape.reclaim(no_op_slider.GetFrontier()) != ReclaimStatus::Ok) {
+      read_frontier(no_op_slider.GetFrontier()) != 4 ||
+      tape.reclaim(read_frontier(no_op_slider.GetFrontier())) != ReclaimStatus::Ok) {
     return false;
   }
 
   const SliderResult third = persistence_slider.process_available();
   const SliderResult empty = persistence_slider.process_available();
   if (!third.ok() || third.processed_count != 1 ||
-      empty.status != SliderStatus::Empty || persistence_slider.GetFrontier() != 5 ||
+      empty.status != SliderStatus::Empty ||
+      read_frontier(persistence_slider.GetFrontier()) != 5 ||
       control.append_calls != 5 || control.sync_calls != 3 ||
       !no_op_slider.process_available().ok() ||
-      no_op_slider.GetFrontier() != 5 ||
-      tape.reclaim(no_op_slider.GetFrontier()) != ReclaimStatus::Ok ||
+      read_frontier(no_op_slider.GetFrontier()) != 5 ||
+      tape.reclaim(read_frontier(no_op_slider.GetFrontier())) != ReclaimStatus::Ok ||
       tape.tail() != 5 || tape.head() != 5) {
     return false;
   }
@@ -212,7 +207,7 @@ template <class Predecessor>
   const auto path = test_path(name);
   std::filesystem::remove(path);
   RecordTape tape;
-  Persistence persistence(tape, tape, policy);
+  Persistence persistence(tape, tape.GetFrontier(), policy);
   if (!open(tape, persistence, path) || !publish(tape, 0) ||
       !publish(tape, 1)) {
     return false;
@@ -224,7 +219,8 @@ template <class Predecessor>
     const SliderResult first = persistence.process_available();
     const SliderResult second = persistence.process_available();
     valid = first.status == SliderStatus::Processed &&
-            first.processed_count == 1 && persistence.GetFrontier() == 2 &&
+            first.processed_count == 1 &&
+            read_frontier(persistence.GetFrontier()) == 2 &&
             second.status == SliderStatus::Processed &&
             second.processed_count == 1 && control.sync_calls == 2;
   }
@@ -238,7 +234,7 @@ template <class Predecessor>
   const auto path = test_path("fexma_wal_persistence_policy_eight.wal");
   std::filesystem::remove(path);
   RecordTape tape;
-  Persistence persistence(tape, tape, PersistencePolicy{8});
+  Persistence persistence(tape, tape.GetFrontier(), PersistencePolicy{8});
   if (!tape.open({wal_config.payload_size, 32, wal_config.alignment}).ok() ||
       !persistence.open(path, physical_config).ok()) {
     return false;
@@ -247,11 +243,11 @@ template <class Predecessor>
     if (!publish(tape, value)) return false;
   }
   const SliderResult first = persistence.process_available();
-  const Position first_frontier = persistence.GetFrontier();
+  const Position first_frontier = read_frontier(persistence.GetFrontier());
   const SliderResult second = persistence.process_available();
-  const Position second_frontier = persistence.GetFrontier();
+  const Position second_frontier = read_frontier(persistence.GetFrontier());
   const SliderResult third = persistence.process_available();
-  const Position third_frontier = persistence.GetFrontier();
+  const Position third_frontier = read_frontier(persistence.GetFrontier());
   const SliderResult empty = persistence.process_available();
   const bool valid = first.status == SliderStatus::Processed &&
                      first.processed_count == 8 && first_frontier == 8 &&
@@ -271,7 +267,7 @@ template <class Predecessor>
   std::filesystem::remove(path);
 
   RecordTape tape;
-  Persistence persistence(tape, tape, PersistencePolicy{2});
+  Persistence persistence(tape, tape.GetFrontier(), PersistencePolicy{2});
   if (!open(tape, persistence, path) || !publish(tape, 0) || !publish(tape, 1)) {
     return false;
   }
@@ -283,7 +279,8 @@ template <class Predecessor>
   const SliderResult failed = slider.process_available();
   const bool valid = failed.status == SliderStatus::ModuleFailed &&
                      failed.processed_count == 0 && slider.current() == 0 &&
-                     slider.GetFrontier() == 0 && persistence.failed() &&
+                     read_frontier(slider.GetFrontier()) == 0 &&
+                     persistence.failed() &&
                      control.append_calls == 1 && control.sync_calls == 0;
   (void)persistence.close();
   tape.close();
@@ -296,19 +293,20 @@ template <class Predecessor>
   std::filesystem::remove(path);
 
   RecordTape tape;
-  Persistence persistence(tape, tape, PersistencePolicy{2});
+  Persistence persistence(tape, tape.GetFrontier(), PersistencePolicy{2});
   if (!open(tape, persistence, path) || !publish(tape, 0)) return false;
 
   auto& persistence_slider = persistence;
   NoOpModule no_op;
-  Slider no_op_slider(tape, persistence_slider, no_op);
+  Slider no_op_slider(tape, persistence_slider.GetFrontier(), no_op);
 
   detail::PhysicalWalFileTestControl initial_control{};
   {
     PhysicalControlGuard guard(initial_control);
     if (!persistence_slider.process_available().ok()) return false;
   }
-  if (persistence_slider.GetFrontier() != 1 || !publish(tape, 1) || !publish(tape, 2)) {
+  if (read_frontier(persistence_slider.GetFrontier()) != 1 ||
+      !publish(tape, 1) || !publish(tape, 2)) {
     return false;
   }
 
@@ -320,7 +318,8 @@ template <class Predecessor>
     failed = persistence_slider.process_available();
   }
   if (failed.status != SliderStatus::ModuleFailed ||
-      failed.processed_count != 2 || persistence_slider.GetFrontier() != 1 ||
+      failed.processed_count != 2 ||
+      read_frontier(persistence_slider.GetFrontier()) != 1 ||
       !persistence.failed() || failure_control.append_calls != 2 ||
       failure_control.sync_calls != 1) {
     return false;
@@ -330,8 +329,8 @@ template <class Predecessor>
   const SliderResult hidden = no_op_slider.process_available();
   const bool valid = drained.ok() && drained.processed_count == 1 &&
                      hidden.status == SliderStatus::Empty &&
-                     no_op_slider.GetFrontier() == 1 &&
-                     tape.reclaim(no_op_slider.GetFrontier()) ==
+                     read_frontier(no_op_slider.GetFrontier()) == 1 &&
+                     tape.reclaim(read_frontier(no_op_slider.GetFrontier())) ==
                          ReclaimStatus::Ok &&
                      tape.tail() == 1 && tape.head() == 3;
   (void)persistence.close();
@@ -340,14 +339,13 @@ template <class Predecessor>
   return valid;
 }
 
-[[nodiscard]] bool obeys_supplied_predecessor_frontier() {
-  const auto path = test_path("fexma_wal_persistence_predecessor.wal");
+[[nodiscard]] bool obeys_supplied_upstream_frontier() {
+  const auto path = test_path("fexma_wal_persistence_upstream.wal");
   std::filesystem::remove(path);
 
   RecordTape tape;
-  Position permitted_end = 2;
-  const TestPredecessor predecessor(permitted_end);
-  Persistence persistence(tape, predecessor, PersistencePolicy{8});
+  Frontier upstream{2};
+  Persistence persistence(tape, upstream, PersistencePolicy{8});
   if (!open(tape, persistence, path)) return false;
   for (std::uint64_t value = 0; value < 5; ++value) {
     if (!publish(tape, value)) return false;
@@ -355,15 +353,16 @@ template <class Predecessor>
 
   const SliderResult first = persistence.process_available();
   if (tape.head() != 5 || first.status != SliderStatus::Processed ||
-      first.processed_count != 2 || persistence.GetFrontier() != 2) {
+      first.processed_count != 2 ||
+      read_frontier(persistence.GetFrontier()) != 2) {
     return false;
   }
 
-  permitted_end = 5;
+  upstream.store(5, std::memory_order_release);
   const SliderResult second = persistence.process_available();
   const bool valid = second.status == SliderStatus::Processed &&
                      second.processed_count == 3 &&
-                     persistence.GetFrontier() == 5;
+                     read_frontier(persistence.GetFrontier()) == 5;
   (void)persistence.close();
   tape.close();
   std::filesystem::remove(path);
@@ -380,7 +379,7 @@ int main() {
           PersistencePolicy{0}, "fexma_wal_persistence_zero.wal"))
     return 2;
   if (!sync_policy_eight_drains_twenty_three()) return 3;
-  if (!obeys_supplied_predecessor_frontier()) return 4;
+  if (!obeys_supplied_upstream_frontier()) return 4;
   if (!batches_sync_then_release_downstream()) return 5;
   if (!append_failure_does_not_publish()) return 6;
   if (!sync_failure_hides_batch_but_durable_prefix_drains()) return 7;

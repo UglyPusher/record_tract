@@ -10,7 +10,6 @@
 
 #include <atomic>
 #include <algorithm>
-#include <concepts>
 #include <cstddef>
 #include <cstdint>
 
@@ -40,30 +39,23 @@ struct SliderResult {
   }
 };
 
-template <class Predecessor, class Module>
+template <class Module>
 class Slider final {
 public:
-  Slider(const RecordTape& source, const Predecessor& predecessor,
+  Slider(const RecordTape& source, const Frontier& upstream_frontier,
          Module& module) noexcept
-      : Slider(source, predecessor, module, ExecutionPolicy{}) {}
+      : Slider(source, upstream_frontier, module, ExecutionPolicy{}) {}
 
-  Slider(const RecordTape& source, const Predecessor& predecessor,
+  Slider(const RecordTape& source, const Frontier& upstream_frontier,
          Module& module, ExecutionPolicy policy) noexcept
-      : source_(source), predecessor_(predecessor), module_(module),
+      : source_(source), upstream_frontier_(&upstream_frontier), module_(module),
         policy_(normalize(policy)) {}
 
-  Slider(const RecordTape& source, Module& module) noexcept
-      requires std::same_as<Predecessor, RecordTape>
-      : Slider(source, source, module, ExecutionPolicy{}) {}
-
-  Slider(const RecordTape& source, Module& module, ExecutionPolicy policy) noexcept
-      requires std::same_as<Predecessor, RecordTape>
-      : Slider(source, source, module, policy) {}
-
   [[nodiscard]] SliderResult process_available() noexcept {
-    Position current = GetFrontier();
+    Position current = frontier_.load(std::memory_order_acquire);
 
-    const Position available_end = predecessor_.GetFrontier();
+    const Position available_end =
+        upstream_frontier_->load(std::memory_order_acquire);
     if (available_end < current) {
       return {SliderStatus::UpstreamRegression, current, 0};
     }
@@ -101,11 +93,11 @@ public:
     return {SliderStatus::Processed, current, processed_count};
   }
 
-  [[nodiscard]] Position GetFrontier() const noexcept {
-    return frontier_.load(std::memory_order_acquire);
-  }
+  [[nodiscard]] const Frontier& GetFrontier() const noexcept { return frontier_; }
 
-  [[nodiscard]] Position current() const noexcept { return GetFrontier(); }
+  [[nodiscard]] Position current() const noexcept {
+    return GetFrontier().load(std::memory_order_acquire);
+  }
   // Cold-path initialization: process_available() must not be active.
   void reset_quiescent(Position initial) noexcept {
     frontier_.store(initial, std::memory_order_relaxed);
@@ -127,20 +119,13 @@ private:
     frontier_.store(end, std::memory_order_release);
   }
 
-  static_assert(std::atomic<Position>::is_always_lock_free);
+  static_assert(Frontier::is_always_lock_free);
 
   const RecordTape& source_;
-  const Predecessor& predecessor_;
+  const Frontier* upstream_frontier_;
   Module& module_;
   const ExecutionPolicy policy_;
-  alignas(64) std::atomic<Position> frontier_{};
+  alignas(64) Frontier frontier_{};
 };
-
-template <class Module>
-Slider(const RecordTape&, Module&) -> Slider<RecordTape, Module>;
-
-template <class Module>
-Slider(const RecordTape&, Module&, ExecutionPolicy)
-    -> Slider<RecordTape, Module>;
 
 } // namespace fexma::wal

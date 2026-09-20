@@ -47,7 +47,7 @@ int main() {
   }
 
   Module module;
-  core::Slider<core::RecordTape, Module> slider(tape, module);
+  core::Slider slider(tape, tape.GetFrontier(), module);
 
   std::atomic<bool> failed{false};
   std::atomic<bool> producer_done{false};
@@ -88,13 +88,13 @@ int main() {
       }
 
       if (result.status == core::SliderStatus::Processed &&
-          tape.reclaim(slider.GetFrontier()) != core::ReclaimStatus::Ok) {
+          tape.reclaim(slider.current()) != core::ReclaimStatus::Ok) {
         failed.store(true, std::memory_order_release);
         return;
       }
 
       if (producer_done.load(std::memory_order_acquire) &&
-          slider.GetFrontier() == tape.GetFrontier()) {
+          slider.current() == tape.head()) {
         return;
       }
 
@@ -111,8 +111,8 @@ int main() {
       !failed.load(std::memory_order_acquire) &&
       producer_done.load(std::memory_order_acquire) &&
       module.processed() == record_count &&
-      slider.GetFrontier() == record_count &&
-      tape.GetFrontier() == record_count && tape.tail() == record_count;
+      slider.current() == record_count && tape.head() == record_count &&
+      tape.tail() == record_count;
 
   tape.close();
   return valid ? 0 : 2;

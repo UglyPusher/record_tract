@@ -78,7 +78,8 @@ bool detail::PersistenceCore::failed() const noexcept {
 }
 
 SliderResult detail::PersistenceCore::process_until(Position available_end) noexcept {
-  Position current = GetFrontier();
+  Position current =
+      GetFrontier().load(std::memory_order_acquire);
   if (available_end < current) {
     return {SliderStatus::UpstreamRegression, current, 0};
   }
@@ -112,8 +113,8 @@ SliderResult detail::PersistenceCore::process_until(Position available_end) noex
   return {SliderStatus::Processed, current, processed_count};
 }
 
-Position detail::PersistenceCore::GetFrontier() const noexcept {
-  return frontier_.load(std::memory_order_acquire);
+const Frontier& detail::PersistenceCore::GetFrontier() const noexcept {
+  return frontier_;
 }
 
 void detail::PersistenceCore::reset_quiescent(Position initial) noexcept {
