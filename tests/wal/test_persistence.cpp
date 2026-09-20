@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <span>
 
 using namespace fexma::record_tract;
@@ -420,6 +421,76 @@ constexpr PhysicalWalConfig physical_config{
   return valid;
 }
 
+[[nodiscard]] bool failed_create_rolls_back_and_retry_succeeds() {
+  const auto path = test_path("fexma_wal_failed_create_rollback.wal");
+  std::filesystem::remove(path);
+
+  RecordTape tape;
+  Persistence persistence(tape, tape.GetFrontier());
+  tape.SetTailRef(persistence.GetFrontier());
+  if (tape.open({wal_config.payload_size, wal_config.capacity,
+                 wal_config.alignment}) != RecordTapeOpenStatus::Ok) {
+    return false;
+  }
+
+  detail::PhysicalWalFileTestControl control{};
+  control.fail_sync_call = 0;
+  OpenResult failed{};
+  {
+    PhysicalControlGuard guard(control);
+    failed = persistence.open(path, physical_config);
+  }
+  if (failed.status != OpenStatus::IoError || persistence.is_open() ||
+      std::filesystem::exists(path)) {
+    tape.close();
+    std::filesystem::remove(path);
+    return false;
+  }
+
+  const OpenResult retry = persistence.open(path, physical_config);
+  const bool valid = retry.ok() && persistence.is_open() &&
+                     std::filesystem::exists(path);
+  (void)persistence.close();
+  tape.close();
+  std::filesystem::remove(path);
+  return valid;
+}
+
+[[nodiscard]] bool preexisting_file_survives_file_exists() {
+  const auto path = test_path("fexma_wal_preexisting_file.wal");
+  std::filesystem::remove(path);
+  const std::array<char, 4> expected{'r', 'c', '1', '!'};
+  {
+    std::ofstream output(path, std::ios::binary);
+    output.write(expected.data(),
+                 static_cast<std::streamsize>(expected.size()));
+  }
+  const auto size_before = std::filesystem::file_size(path);
+
+  RecordTape tape;
+  Persistence persistence(tape, tape.GetFrontier());
+  tape.SetTailRef(persistence.GetFrontier());
+  if (tape.open({wal_config.payload_size, wal_config.capacity,
+                 wal_config.alignment}) != RecordTapeOpenStatus::Ok) {
+    std::filesystem::remove(path);
+    return false;
+  }
+  const OpenResult result = persistence.open(path, physical_config);
+
+  std::array<char, 4> actual{};
+  {
+    std::ifstream input(path, std::ios::binary);
+    input.read(actual.data(), static_cast<std::streamsize>(actual.size()));
+  }
+  const bool valid = result.status == OpenStatus::FileAlreadyExists &&
+                     !persistence.is_open() &&
+                     std::filesystem::file_size(path) == size_before &&
+                     actual == expected;
+  tape.close();
+  std::filesystem::remove(path);
+  return valid;
+}
+
 } // namespace
 
 int main() {
@@ -433,5 +504,7 @@ int main() {
   if (!sticky_failure_precedes_empty_result()) return 7;
   if (!sync_failure_hides_batch_but_durable_prefix_drains()) return 8;
   if (!tape_and_persistence_have_independent_lifecycles()) return 9;
+  if (!failed_create_rolls_back_and_retry_succeeds()) return 10;
+  if (!preexisting_file_survives_file_exists()) return 11;
   return 0;
 }

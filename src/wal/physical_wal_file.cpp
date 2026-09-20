@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <limits>
+#include <system_error>
 
 #if defined(_WIN32)
 #define NOMINMAX
@@ -256,6 +257,20 @@ OpenStatus PhysicalWalAdapter::create(const std::filesystem::path& path,
   }
 #endif
 
+  const auto rollback_create = [&]() noexcept {
+    (void)close();
+    std::error_code error;
+    const bool removed = std::filesystem::remove(path, error);
+#if !defined(_WIN32)
+    if (removed) {
+      (void)sync_parent_directory(path);
+    }
+#else
+    (void)removed;
+#endif
+    return OpenStatus::IoError;
+  };
+
   config_ = config;
   FileHeader header{};
   header.stream_kind = config.stream_kind;
@@ -271,8 +286,7 @@ OpenStatus PhysicalWalAdapter::create(const std::filesystem::path& path,
   const auto header_bytes = serialize_file_header(header);
 
   if (!write_bytes(header_bytes)) {
-    (void)close();
-    return OpenStatus::IoError;
+    return rollback_create();
   }
 
   const std::array<std::byte, wal_default_alignment> zeros{};
@@ -281,8 +295,7 @@ OpenStatus PhysicalWalAdapter::create(const std::filesystem::path& path,
     const std::uint32_t chunk = std::min(
         remaining, static_cast<std::uint32_t>(zeros.size()));
     if (!write_bytes({zeros.data(), chunk})) {
-      (void)close();
-      return OpenStatus::IoError;
+      return rollback_create();
     }
     remaining -= chunk;
   }
@@ -292,8 +305,7 @@ OpenStatus PhysicalWalAdapter::create(const std::filesystem::path& path,
       || !sync_parent_directory(path)
 #endif
   ) {
-    (void)close();
-    return OpenStatus::IoError;
+    return rollback_create();
   }
   return OpenStatus::Ok;
 }
