@@ -1,486 +1,163 @@
 # Record Tract Contract
 
-## Core Model
-
-`record_tract` provides a single-publisher, multi-consumer ordered record tract.
-The core contract is defined by `RecordTape`, owner-specific progress
-boundaries, `Slider<Predecessor, Module>`, the module processing contract, and
-composition-owned topology and reclamation.
-Physical WAL persistence is a specialized optional stage described separately
-below.
-
-`RecordTape` is independent of persistence:
+## Core public API
 
 ```cpp
+namespace fexma::wal {
+
+using Position = std::uint64_t;
+using Frontier = std::atomic<Position>;
+
 class RecordTape {
 public:
-  RecordTapeOpenStatus open(const RecordTapeConfig& config) noexcept;
-  PublishResult try_publish(std::span<const std::byte> payload) noexcept;
-  AccessResult try_view(Position position) const noexcept;
-  void SetTailRef(const Frontier& terminal) noexcept;
-  ReclaimStatus reclaim(Position end) noexcept;
+  RecordTapeOpenStatus open(const RecordTapeConfig&) noexcept;
+  PublishResult try_publish(std::span<const std::byte>) noexcept;
+  AccessResult try_view(Position) const noexcept;
+  void SetTailRef(const Frontier&) noexcept;
   void close() noexcept;
 
+  bool is_open() const noexcept;
   Position head() const noexcept;
-  std::uint32_t payload_size() const noexcept;
-  Position GetFrontier() const noexcept;
   Position tail() const noexcept;
+  std::uint32_t payload_size() const noexcept;
+  const Frontier& GetFrontier() const noexcept;
 };
+
+template <class Module>
+class Slider {
+public:
+  Slider(const RecordTape&, const Frontier&, Module&) noexcept;
+  Slider(const RecordTape&, const Frontier&, Module&, ExecutionPolicy) noexcept;
+
+  SliderStatus process() noexcept;
+  const Frontier& GetFrontier() const noexcept;
+  Position current() const noexcept;
+};
+}
 ```
 
-RecordTape value types are declared in
-`<fexma/record_tract/record_tape_types.hpp>`; physical WAL format and lifecycle
-types are declared in `<fexma/wal/types.hpp>`. RecordTape headers do not depend
-on physical WAL definitions. Tape `default_alignment` and physical
-`wal_default_alignment` are independent defaults even though both currently
-equal 64.
+`Slider` has no upstream object dependency or upstream template parameter. It
+stores only a read-only pointer to the upstream `Frontier`. `GetFrontier()` is a
+composition accessor; the processing hot path loads the stored upstream atomic
+directly.
 
-`RecordTape` owns bounded warmed storage and the intrinsic `head` and `tail`
-boundaries. It performs no file operation and has no durable boundary or
-persistence failure state. `reclaim(end)` accepts only monotonic exclusive
-boundaries in `[tail, head]`; the composition is responsible for proving that
-all mandatory readers have finished below `end`.
+## Topology and frontier meaning
 
-`SetTailRef()` is bootstrap-only topology wiring. It must be called before
-`open()` and the referenced terminal frontier must outlive the tape. Calling it
-after `open()` is a programmer/lifecycle error and terminates; the terminal
-frontier reference is immutable for the open runtime lifetime.
+```text
+Head Frontier -> Slider A -> Slider B -> ... -> terminal Frontier == Tail
+```
 
-`RecordTape` has a one-shot lifecycle:
+The tract is linear. `RecordTape` is a bounded preallocated ring. The Head is
+the producer publication boundary. Each Slider owns and publishes one
+Frontier. A Frontier value `N` certifies that its owner completed all positions
+`< N` and no longer retains their views or references.
+
+The terminal stage Frontier is the Tape Tail boundary. RecordTape observes it
+directly through a `const Frontier*`; it does not own a second Tail atomic.
+With no stages, the default terminal Frontier is the Tape Head, so
+`Tail == Head`.
+
+Topology wiring is performed before `RecordTape::open()`:
+
+```cpp
+RecordTape tape;
+Module module_a;
+Slider a{tape, tape.GetFrontier(), module_a};
+tape.SetTailRef(a.GetFrontier());
+```
+
+After open, topology is immutable. `SetTailRef()` after open is a lifecycle
+violation and terminates. The referenced Frontier owner must outlive the Tape.
+
+## Slider processing
+
+```cpp
+const SliderStatus status = slider.process();
+```
+
+The Slider processes only:
+
+```text
+[current_frontier, upstream_frontier)
+```
+
+`Processed` means its Frontier advanced. `Empty` means no new upstream
+positions were observed. `ModuleFailed` is the module's runtime failure
+outcome. Broken Frontier, view, and lifecycle invariants fail fast and are not
+returned as processing statuses. `ViewStatus` remains part of direct
+`RecordTape::try_view()` results for callers that use that API directly.
+
+`ExecutionPolicy::read_count` and `publish_count` are bootstrap preconditions
+and must be greater than zero. `publish_count` controls release-publication
+cadence. A successful residual prefix is published before return, including a
+successful prefix before `ModuleFailed`.
+
+## RecordTape lifecycle
 
 ```text
 Constructed -> Open -> Closed
 ```
 
-An invalid configuration or allocation failure leaves a never-opened Tape in
-`Constructed`, so a later valid `open()` is allowed. After the first successful
-`open()`, `close()` is terminal for that object. A repeated `open()` while open
-returns `RecordTapeOpenStatus::AlreadyOpen`; an `open()` after `close()` is a
-lifecycle violation and terminates. Repeated `close()` calls are idempotent.
+- A failed first `open()` leaves the object Constructed.
+- A successful `open()` starts its only lifetime.
+- `open()` while Open returns `RecordTapeOpenStatus::AlreadyOpen`.
+- `close()` is terminal and idempotent.
+- `open()` after Close is a programmer/lifecycle violation and terminates.
+- `open()` and `close()` require quiescent runtime roles.
 
-`RecordTapeConfig` contains only runtime storage fields: fixed payload size,
-capacity, and allocation alignment.
+`SetTailRef()` must precede the successful open. RecordTape has no reset or
+reopen operation.
 
-## Progress Boundaries And Slider
-
-Ordinary stage mechanics are provided by
-`<fexma/record_tract/slider.hpp>`:
+## Persistence API and durability
 
 ```cpp
-RecordTape tape;
-NoOpModule first_module;
-NoOpModule second_module;
-
-Slider first(tape, first_module);
-Slider second(tape, first, second_module);
-
-SliderStatus first_status = first.process();
-SliderStatus second_status = second.process();
-Position visible_downstream = second.GetFrontier();
-```
-
-Every frontier value is an exclusive end: value `N` certifies completion of
-positions `[0, N)` for the owner that exposes it. `RecordTape::GetFrontier()` is
-its published boundary and is equivalent to `head()`. Each Slider owns its
-processed boundary and exposes acquire observation through `GetFrontier()`.
-These owners do not share a public frontier type or necessarily use identical
-internal mechanics.
-
-`Slider<Predecessor, Module>` holds a const reference to its predecessor. The
-predecessor structurally provides a suitable `GetFrontier()` operation; it need
-not be a Slider. The separately supplied `RecordTape` remains the source of
-record data. A root Slider uses the tape itself as predecessor, while a
-downstream Slider may use another Slider as shown above.
-
-`process()` is one synchronous call. It snapshots
-`predecessor.GetFrontier()`, obtains every consecutive immutable `RecordView`
-from the source tape through that exclusive end, and calls
-`module.process(record)`. The module returns `true` only after processing that
-position is complete. Only completed progress may be published to the Slider's
-own frontier according to its current execution policy. The library does not
-prescribe the number of processing stages or provide a runtime topology.
-
-### Execution Policy
-
-```cpp
-struct ExecutionPolicy final {
-  std::size_t read_count{1};
-  std::size_t publish_count{1};
+struct PhysicalWalConfig {
+  std::uint32_t alignment{wal_default_alignment};
+  std::uint32_t payload_schema_version{};
+  StreamKind stream_kind{StreamKind::Generic};
+  StreamId stream_id{};
+  EpochId epoch_id{};
+  std::uint64_t first_sequence{1};
+  ManifestId manifest_id{};
 };
-```
 
-`read_count` is the internal read-pass size. It partitions the traversal of the
-single observed predecessor range; it is not a maximum record count for
-`process()` and is not a yield or scheduling quantum. The current
-source path obtains one zero-copy borrowed `RecordView` at a time through
-`RecordTape::try_view()`, so read-pass boundaries currently do not change
-externally observable successful behavior. The pass structure is retained for
-read mechanics that may later require bounded materialization, without defining
-such a path today.
-
-`publish_count` is the processed-frontier publication batch size. After that
-many successful module calls, Slider release-publishes the next exclusive end.
-A residual successful prefix is published before successful return and before
-an existing module failure return. The failed position is never included.
-
-Both `ExecutionPolicy` fields are bootstrap preconditions and must be greater
-than zero. Passing zero is a programmer error; debug builds assert this
-precondition and the supplied policy is preserved without normalization:
-
-```text
-{8, 4} -> {8, 4}
-```
-
-The slider owns no thread, scheduling loop, wait/spin/yield behavior, runtime
-registry, virtual dispatch, neighbor type, persistence operation, or snapshot
-interpretation. Calling and retry cadence belongs to the composition. Upstream
-frontier regression or failure to obtain a view inside the permitted range
-violates the tract topology, publication, or lifecycle invariant and terminates
-processing rather than producing a runtime status.
-
-## Module Contract
-
-A generic module provides synchronous processing compatible with:
-
-```cpp
-bool process(const RecordView& record) noexcept;
-```
-
-Returning `true` means processing of that position is complete and permits the
-Slider to publish the next exclusive end. Returning `false` leaves the own
-frontier at the failed position so the composition may retry or stop according
-to its policy.
-
-`NoOpModule` accepts every complete `RecordView` without changing application
-state. It exists as the minimal module for composition tests. In the linear
-bare pipeline, the composition may call
-`tape.reclaim(no_op_slider.GetFrontier())` only after the slider call has
-returned and all views from the reclaimed range are retired. Publishing the
-module frontier alone does not release storage or remove producer backpressure.
-
-## Persistence Specialization
-
-`PhysicalWalConfig` contains persisted identity and physical layout fields but
-does not duplicate the source tape's `payload_size` or contain runtime capacity.
-Persistence derives the physical payload size from the already opened
-`RecordTape`. Public Persistence is the independent
-`Persistence<Predecessor>` tract mechanism; it is not a generic Slider paired
-with a persistence module. It receives a `RecordTape` as its record source and a
-predecessor as the source of its permitted boundary. A root Persistence may use
-the same tape as both source and predecessor.
-
-`Persistence::open()` requires the source `RecordTape` to be already open and
-configured. Calling it while the source is closed is a bootstrap/programmer
-error and terminates; it is not reported as `OpenStatus::InvalidConfig`. The
-physical WAL payload size is derived from `RecordTape::payload_size()`; it is
-not supplied independently through `PhysicalWalConfig`.
-
-```cpp
-struct PersistencePolicy final {
+struct PersistencePolicy {
   std::size_t sync_count{1};
 };
 
-template <class Predecessor>
-class Persistence {
-public:
-  Persistence(const RecordTape& source, const Predecessor& predecessor,
-              PersistencePolicy policy = {}) noexcept;
-  explicit Persistence(const RecordTape& source,
-                       PersistencePolicy policy = {}) noexcept
-      requires std::same_as<Predecessor, RecordTape>;
-
-  OpenResult open(const std::filesystem::path& path,
-                  const PhysicalWalConfig& config) noexcept;
-  bool close() noexcept;
-  bool is_open() const noexcept;
-  bool failed() const noexcept;
-
-  SliderStatus process() noexcept;
-  Position GetFrontier() const noexcept;
-  Position current() const noexcept;
-};
+Persistence persistence{source, upstream, policy};
 ```
 
-The supported root and chained construction forms are:
-
-```cpp
-RecordTape tape;
-Persistence root_persistence(tape, PersistencePolicy{8});
-
-NoOpModule module;
-Slider predecessor(tape, module);
-Persistence chained_persistence(tape, predecessor, PersistencePolicy{8});
-```
-
-Both Persistence objects read records from `tape`. The root object also uses
-the tape as its predecessor; the chained object obtains its permitted boundary
-from `predecessor.GetFrontier()`.
-
-`Persistence<Predecessor>` is separate from generic Slider processing because
-it selects a bounded batch, appends every selected record, synchronizes the
-complete batch once, and only then publishes its owner-held frontier. In a
-persistence composition that frontier is conventionally named `durable`.
-Append, sync, or physical sequence exhaustion leaves durable progress unchanged
-and puts Persistence into its terminal failed state for the current open writer
-lifetime. Once failed, every subsequent `process()` returns `ModuleFailed`,
-including when there is no pending upstream work; it performs no further append
-or synchronization. Lifecycle misuse is a separate precondition violation and
-does not establish the failed state.
-
-`detail::PersistenceCore` implements the non-template mechanics behind the
-public template. It owns the current policy, durable progress atomic, terminal
-failure state, and selected `PhysicalWalAdapter`. It is an implementation
-detail, not a separately composed public stage.
-
-`PhysicalWalAdapter` is the internal boundary to the selected concrete physical
-WAL implementation. Persistence chooses the batch, requests append and sync,
-publishes durable progress after success, and propagates failure. The adapter
-creates and writes the physical file, appends physical records, synchronizes,
-and closes its native handle.
-
-### Physical WAL Payload And Identity
-
-Each physical WAL instance has one non-zero `payload_size`, one file-level
-`payload_schema_version`, one stream identity, one epoch, and one non-zero
-`first_sequence`. Payload bytes and the meaning of the schema version are opaque
-to the WAL. Schema version `0` is reserved for callers that do not declare an
-application payload schema. Runtime `capacity` belongs to the in-memory tract
-configuration and is not a property of the physical WAL file.
-
-Generic infrastructure WALs may use zero stream, epoch, and manifest identities.
-Command and Event WALs require non-zero `stream_id`, `epoch_id`, and
-`manifest_id`. Runtime `capacity` is not part of the physical file identity.
-
-`payload_size` is fixed for the entire file. Physical records do not carry an
-individual payload length. Application schemas that encode shorter logical
-values into the fixed payload are responsible for deterministic initialization
-of every remaining byte.
-
-The cold-path API in `reader.hpp` provides `WalReader` and `scan_wal()`.
-`WalReader::open()` requires the expected persisted WAL configuration; runtime
-capacity is ignored. `read_next()` is sequential and allocation-free after
-open. It returns `Record` only after complete physical validation. Supplying an
-output span whose size differs from the configured payload size returns
-`ReadStatus::InvalidPayloadSize` without advancing the reader or making the
-reader failed; a subsequent call with a correctly sized span addresses the same
-next record.
-
-The file must be quiescent: no writer may append, synchronize, truncate, or
-replace it while a reader or scanner is active. Validation proves physical
-integrity, not the still-open runtime writer's durable frontier. After a crash,
-the maximal contiguous fully validated prefix is the authoritative recovered
-WAL and all of its records participate in replay and rebuild. Validation of
-that prefix includes file identity and format, header integrity, contiguous
-sequence, payload integrity, record boundaries, and zero padding; it is not
-limited to CRC checks.
-
-The reader validates file identity, format, header CRC, record header CRC,
-contiguous sequence, payload CRC, record boundaries, and zero padding. Any
-physical validation failure is terminal for that reader instance. It never
-skips or attempts to resynchronize after a damaged record.
-
-`scan_wal()` is read-only. It returns the longest trusted record prefix and its
-ending file offset. Partial record header, payload, or padding is classified as
-`IncompleteTail`; other integrity failures are classified as corruption. File
-truncation and recovery mutation are outside this API.
-
-The cold-path API in `recovery.hpp` provides
-`recover_incomplete_tail(path, expected)`. The caller must own exclusive access
-to the quiescent file for the entire operation. Recovery first performs the same
-validated scan, and mutates the file only when that scan reports an incomplete
-trailing record. It truncates to `last_valid_offset`, physically synchronizes
-the file, and performs a complete validated rescan before returning
-`RecoveryStatus::Recovered`.
-
-The following conditions are always refused without mutation:
-
-- incomplete or invalid file header;
-- invalid complete record, including the final record;
-- corruption in the middle of the file;
-- sequence gap or duplicate;
-- stream, epoch, manifest, physical format, payload schema, or layout mismatch.
-
-`RecoveryResult` reports the original and recovered sizes, removed byte count,
-trusted record count, last sequence, and trusted offset. A clean file returns
-`Clean` without opening it for mutation. A truncate or physical-sync failure
-returns `IoError`; callers must not infer successful durability from that
-result. If synchronization fails after truncation, the reported current size
-may already differ from the original size; the process must remain fail-closed
-instead of treating a subsequent clean scan as proof of durable recovery.
-Every complete record in the validated post-crash trusted prefix is part of
-history regardless of whether a client received an acknowledgement. Batches
-are live-writer append-and-sync units only; the physical format has no batch
-commit records or commit markers. Client retry and ingress idempotency are
-outside the `RecordTape` tail contract.
-
-## Roles
-
-For `RecordTape`, one producer owns `try_publish()` and one composition reclaimer
-owns `reclaim()`. Coordinated read-only users may call `try_view()` while the
-retention precondition is maintained. `open()` and `close()` require all these
-roles to be stopped.
-
-Each Slider owns and publishes its processing frontier. A valid composition has
-one runtime executor mutating a Slider while other stages observe its progress
-through `GetFrontier()`. Stage topology, execution policy, and selection of the
-frontier or frontiers that protect reclamation belong to the composition.
-
-## Payload Lifetime
-
-Publish input spans remain owned by the caller. Publication finishes its copy
-synchronously and does not retain the span or access caller memory after
-return.
-
-## Retained Position View
-
-`try_view(position)` is a non-blocking, allocation-free borrowed read of the
-`RecordTape`. `Position` is an absolute zero-based position, never a slot number
-or a physical sequence. The result contains `ViewStatus` and a `RecordView`
-with `position` and the complete fixed-size
-`std::span<const std::byte> payload`. It does not copy payload bytes or move any
-frontier. The current storage has no additional per-position service fields or
-stage pockets.
-
-Status checks precede address calculation:
-
-- `Closed`: the `RecordTape` is not open;
-- `Reclaimed`: `position < tail`;
-- `Unpublished`: `position >= head`;
-- `Ok`: `tail <= position < head`.
-
-Unsuccessful results contain an empty payload and zero position.
-Status reflects the observed frontiers; publication may advance concurrently.
-The operation acquires `head` before exposing producer-written bytes. It does
-not require persistence success or consult `durable`: retained pending records
-are accessible to persistence and other appropriately coordinated readers.
-A downstream stage must obtain and obey its permitted boundary through its
-predecessor's `GetFrontier()` before using a view.
-
-Coordinates remain:
+The boundary is:
 
 ```text
-retained positions                  [tail, head)
-exclusive frontier after position p p + 1
+RecordTape / upstream Frontier -> Persistence -> PhysicalWalAdapter
 ```
 
-Only the implementation maps `position % capacity` to a block. A reclaimed
-absolute identity cannot be used to read its replacement after ring wraparound.
+The source Tape must be open before `Persistence::open()`. This is a bootstrap
+precondition; violation terminates and is not returned as `OpenStatus`.
+Payload size is derived from `RecordTape::payload_size()`. Physical WAL
+alignment and other physical geometry remain WAL responsibilities.
 
-**Caller-owned retention is a precondition, not a feature of the view.** Before
-requesting a potentially accessible position, the caller must coordinate with
-the sole reclaimer so that `tail` cannot pass that position during the call or
-while any returned view is used. Multiple readers may borrow the same retained
-position under that condition. The range checks do not pin storage, register a
-reader, or protect against concurrent reclamation. Rechecking atomics does not
-make an uncoordinated reader safe.
+Persistence selects at most `sync_count` records from its current Frontier to
+the acquired upstream Frontier. It appends the complete batch, synchronizes,
+and only then publishes its durable Frontier.
 
-For a linear slider composition, the reclaimer may follow the final mandatory
-published frontier only after all readers of those positions have finished.
+Append failure, sync failure, and physical sequence exhaustion set sticky
+terminal `failed_`. Failed is absorbing: every later `process()` returns
+`SliderStatus::ModuleFailed`, including an empty selection; it performs no
+further append or sync and does not advance the durable Frontier. Lifecycle
+misuse does not set `failed_`. Persistence close is terminal and processing and
+close require quiescent roles. Reopen is not part of the contract.
 
-The view expires when `tail` passes its position. All view users must also stop
-and retire their views before `close()`, destruction, or a subsequent reopen.
-The lifecycle operations do not track outstanding views. Views and runtime
-positions from a previous open lifetime cannot be reused.
+## Borrowed views and memory ordering
 
-## Publish
+`try_view()` returns a non-owning `std::span<const std::byte>`. The caller must
+ensure that the terminal Frontier cannot pass the position while the view is
+used. The API does not pin a slot or register a reader.
 
-`try_publish()` is non-blocking and allocation-free. On success it copies one
-payload into the block at `head`, publishes `head + 1`, and returns the
-published position.
-
-It returns `Full` when `head - tail == capacity`. Success does not mean the
-payload is durable or available to a downstream stage.
-
-The persistence-free `RecordTape` does not infer downstream failure. A
-composition must stop production when any mandatory stage whose progress is
-required for safe operation can no longer advance.
-
-If the exclusive `head` reaches the end of the `Position` domain,
-`try_publish()` returns `PositionExhausted`; no wrapped position is published.
-Downstream stages may finish the already published valid prefix.
-
-`PositionExhausted` is a defensive arithmetic invariant and terminal boundary
-condition, not an operationally reachable failure mode for the supported system
-lifetime. At a sustained rate of 10,000,000 positions per second, exhausting
-the 64-bit monotonic absolute position space takes approximately 58,455 years.
-The testing policy is therefore:
-
-```text
-PositionExhausted:
-    contract: REQUIRED
-    wraparound: FORBIDDEN
-    direct runtime test: NOT REQUIRED
-    RC blocker if untested: NO
-```
-
-No test hook, reduced-width `Position`, artificial initialization near
-`UINT64_MAX`, or equivalent production/test machinery is required solely to
-exercise this boundary. Its lack of a direct runtime test is not a test-coverage
-gap. Ordinary bounded-capacity exhaustion returns `Full` and remains a separate,
-operationally tested condition.
-
-## Persistence Progress
-
-`Persistence<Predecessor>::process()` reads its permitted boundary
-from `predecessor.GetFrontier()` and selects at most its configured
-`sync_count` from `[durable, permitted boundary)`. `sync_count` must be greater
-than zero; passing zero is a programmer error asserted during bootstrap rather
-than normalized. An empty selection performs no physical sync.
-
-Upstream frontier regression or failure to obtain a source view inside that
-range violates the tract invariant and terminates processing rather than
-producing a runtime status.
-
-For a non-empty batch the physical writer:
-
-1. appends every physical record in sequence order;
-2. performs exactly one OS-level physical synchronization;
-3. reports success to Persistence.
-
-Only then does Persistence publish the batch end as the new
-`durable` frontier.
-
-Physical synchronization is `FlushFileBuffers` on Windows, `fdatasync` on
-POSIX, and `fsync` on macOS. Creating a file also synchronizes its initial
-header; POSIX creation additionally synchronizes the parent directory entry.
-
-Append, sync, or physical sequence exhaustion leaves `durable` unchanged and
-puts Persistence into its terminal failed state for the current open writer
-lifetime. Once failed, every subsequent `process()` returns `ModuleFailed`,
-including when there is no pending upstream work; it performs no further append
-or synchronization. Lifecycle misuse is a separate precondition violation and
-does not establish the failed state. On sync failure,
-records from the failed batch may already have been appended to the physical
-file; there is no rollback or truncation in the live writer. Those records
-remain invisible to downstream runtime stages because `durable` is not
-advanced. After a crash or writer shutdown, the authoritative physical history
-is instead determined by validated WAL scanning and recovery rules,
-independently of the lost runtime `durable` frontier.
-
-## Lifecycle
-
-`RecordTape::open()` validates configuration, allocates and warms ring storage,
-and resets its intrinsic Head boundary. Terminal frontier wiring must already
-be complete before `open()`; `SetTailRef()` after `open()` terminates. The
-successful open is one-shot: the object cannot be reopened after `close()`.
-Each generic Slider owns its processed frontier, which starts at its bootstrap
-state and advances only through normal processing publication.
-
-`Persistence::open()` creates and physically synchronizes a new WAL file.
-Creation is exclusive: an existing path returns `OpenStatus::FileAlreadyExists`
-and is not modified. A successful open starts a new writer lifetime and clears
-any failure state left by a previous closed lifetime. Cold-path incomplete-tail
-recovery is an explicit, separate operation and does not reopen the live writer.
-The composition is responsible for stopping all roles and closing the
-components in a safe order.
-
-## Intentional Limits
-
-- Existing WAL files cannot be reopened by Persistence.
-- Recovery removes only scanner-proven incomplete trailing records. It does not
-  repair corruption or reopen an existing live writer.
-- There is no segment rotation, compaction, or consumer checkpoint.
-- Storage is one monolithic allocation, not an external block pool.
-- The library provides no runtime stage registry or prescribed stage count;
-  topology is explicit and composition-owned.
-- NUMA placement and CRC acceleration are not implemented.
+Payload writes precede Head release publication; readers acquire Head before
+exposing payload. Stage completion precedes release publication of its
+Frontier; downstream stages acquire the upstream Frontier. The producer
+acquires the terminal Frontier before reusing a slot. Lifecycle operations are
+not concurrent with runtime operations.

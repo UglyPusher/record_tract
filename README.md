@@ -1,196 +1,125 @@
 # record_tract
 
-`record_tract` is a C++20 library for a single-publisher, multi-consumer ordered
-record tract. Its core is a bounded `RecordTape` with owner-specific progress
-boundaries and statically composed `Slider<Predecessor, Module>` processing
-stages. Physical WAL persistence is an optional specialized stage built on the
-same tract.
-Low-level serialization helpers are exposed under `<fexma/binary/...>`.
+`record_tract` is a C++20 library for a single-publisher, ordered linear
+record tract. Its Core is a bounded preallocated `RecordTape` and statically
+composed `Slider<Module>` stages. Optional WAL persistence is a specialized
+stage over the same tape.
 
-The available build-tree CMake targets are:
+Build-tree targets:
 
-- `fexma::record_tract`
-- `fexma::wal`
-- `fexma::binary`
+- `fexma::record_tract` — Core;
+- `fexma::wal` — Persistence, physical WAL, Reader, and Recovery;
+- `fexma::binary` — binary helpers.
 
-`fexma::record_tract` contains the Core implementation and public/header-only
-Core facilities. `fexma::wal` contains Persistence, physical WAL, Reader, and
-Recovery and has a `PUBLIC` dependency on `fexma::record_tract`; existing WAL
-consumers therefore retain transitive access to Core. These are build-tree
-aliases; the repository does not currently define install or package-export
-rules.
+## Core model
+
+```text
+Head frontier -> Slider A -> Slider B -> ... -> terminal frontier == Tail
+```
+
+`RecordTape` owns a fixed-size, preallocated ring. The producer owns and
+publishes its Head frontier. Every Slider owns one mutable Frontier and exposes
+it to downstream stages as `const Frontier&`. A Frontier value `N` certifies
+that its stage completed every position `< N` and no longer retains views of
+those records.
+
+The terminal stage Frontier is also the RecordTape reclamation boundary. The
+tape observes it directly as its Tail boundary. A tract without stages uses
+the tape Head as Tail.
+
+Topology is linear and immutable during runtime. All `SetTailRef()` wiring must
+be complete before `RecordTape::open()`. Calling it after open is a lifecycle
+violation and terminates.
+
+## RecordTape
+
+```cpp
+namespace core = fexma::wal;
+
+core::RecordTape tape;
+core::Frontier terminal{};
+
+tape.SetTailRef(terminal); // optional; must precede open()
+const auto status = tape.open({payload_size, capacity,
+                               core::default_alignment});
+```
+
+The default terminal reference points to the tape's own Head, which gives the
+zero-stage `Tail == Head` behavior. `try_publish()` is single-producer and
+returns `Full` for normal bounded backpressure. `try_view()` is a direct
+borrowed view API for callers that maintain the retention precondition.
+
+RecordTape lifecycle is one-shot:
+
+```text
+Constructed -> Open -> Closed
+```
+
+An invalid first open or allocation failure leaves the object Constructed. An
+open call while Open returns `RecordTapeOpenStatus::AlreadyOpen`. `close()` is
+terminal and idempotent. Reopening after a successful lifetime terminates.
+Lifecycle operations require a quiescent tract; concurrent `close()` and
+runtime operations are not supported.
+
+## Slider
+
+```cpp
+class Module final {
+public:
+  bool process(const core::RecordView&) noexcept { return true; }
+};
+
+Module module_a;
+Module module_b;
+core::Slider a{tape, tape.GetFrontier(), module_a};
+core::Slider b{tape, a.GetFrontier(), module_b};
+tape.SetTailRef(b.GetFrontier()); // before tape.open()
+```
+
+The upstream Frontier is passed explicitly. Slider does not know or retain an
+upstream object. `process()` returns `Processed`, `Empty`, or `ModuleFailed`.
+`ModuleFailed` is the module's runtime outcome. Broken Frontier, view, or
+lifecycle invariants fail fast rather than becoming processing statuses.
+
+`ExecutionPolicy::read_count` and `publish_count` must both be greater than
+zero. `publish_count` controls publication cadence; a successful residual
+prefix is published before return, including before a module failure return.
+
+Only one executor may call `process()` on a given Slider. The module, tape,
+upstream Frontier owner, and downstream observers must obey the composition's
+lifetime and quiescence rules.
+
+## Persistence
+
+```text
+RecordTape / upstream Frontier -> Persistence -> PhysicalWalAdapter
+```
+
+```cpp
+core::Persistence persistence{tape, tape.GetFrontier(), policy};
+tape.SetTailRef(persistence.GetFrontier()); // before tape.open()
+
+persistence.open(path, physical_wal_config);
+core::Slider downstream{tape, persistence.GetFrontier(), module};
+```
+
+The source Tape must already be open before `Persistence::open()`. Payload
+size is derived from `RecordTape::payload_size()`; physical WAL alignment and
+other WAL geometry remain owned by the WAL configuration and adapter.
+
+Persistence appends a bounded batch and synchronizes it before publishing its
+durable Frontier. Append failure, sync failure, and physical sequence
+exhaustion set sticky terminal `failed_`. Failed is absorbing: subsequent
+`process()` calls return `ModuleFailed`, perform no I/O, and do not advance the
+durable Frontier. Lifecycle misuse does not set `failed_`. Persistence close is
+terminal; reopening is not part of the contract. Its processing and close
+operations also require quiescence.
+
+## Build
 
 ```cmake
 target_link_libraries(core_consumer PRIVATE fexma::record_tract)
 target_link_libraries(wal_consumer PRIVATE fexma::wal)
 ```
 
-The source tree follows the same ownership boundary:
-
-```text
-include/fexma/record_tract/  Core public headers
-include/fexma/wal/           WAL, Reader, and Recovery public headers
-src/record_tract/            Core implementation
-src/wal/                     WAL implementation and private physical headers
-tests/core/                  Core-only tests
-tests/wal/                   WAL, Reader, and Recovery tests
-tests/binary/                Standalone binary-helper tests
-```
-
-## Core Record Tract
-
-`RecordTape` owns only:
-
-```text
-tail <= retained positions < head
-head - tail <= capacity
-```
-
-`RecordTape` provides single-producer publication, absolute-position immutable
-views, bounded reclamation, and position exhaustion handling. It contains no
-persistence frontier, file writer, or persistence failure state.
-
-A frontier is an owner-specific monotonic exclusive progress boundary. A value
-of `N` certifies that positions `[0, N)` have completed the work represented by
-that owner. `RecordTape::GetFrontier()` returns its published boundary and is
-equivalent to `head()`. Each Slider owns its processed boundary and exposes it
-through `Slider::GetFrontier()`. There is no standalone public frontier object.
-
-`Slider<Predecessor, Module>` provides synchronous stage mechanics over
-`RecordTape`. The separately supplied `RecordTape` provides record data through
-`try_view(position)`. The predecessor provides the permitted exclusive end
-through `GetFrontier()`. The Slider processes permitted records in position
-order through one statically bound module and publishes completed progress to
-its own frontier. It owns no worker, polling loop, wait strategy, runtime
-topology, or domain semantics.
-
-`ExecutionPolicy::read_count` is the internal read-pass size;
-`process()` still drains the complete range visible in its single
-predecessor-frontier observation unless processing fails. With the current
-zero-copy `try_view(position)` path, read-pass boundaries do not change
-externally observable successful behavior. They are retained for read mechanics
-that may later require bounded materialization. `publish_count` is the number of
-successfully processed records between frontier publications. Final successful
-progress and a successful prefix before failure are flushed before return. If
-Both policy fields are bootstrap preconditions and must be greater than zero.
-Passing zero is a programmer error; the Slider asserts this precondition in
-debug builds and does not normalize the policy.
-
-The root and downstream construction forms are:
-
-```cpp
-RecordTape tape;
-NoOpModule first_module;
-NoOpModule second_module;
-
-Slider first(tape, first_module);         // predecessor is tape
-Slider second(tape, first, second_module); // predecessor is first
-```
-
-`RecordTape` can be the root predecessor because its `GetFrontier()` is its
-published `head`. A downstream predecessor need not be a Slider; it need only
-provide the structurally required `GetFrontier()` operation. In every case the
-record data still comes from `tape`.
-
-The first bare composition is:
-
-```text
-producer -> RecordTape::GetFrontier() -> Slider<NoOpModule>
-                                           |
-                                           v
-                                Slider::GetFrontier() -> reclaimer -> tail
-```
-
-More generally, multiple stages may use the tape or another structurally
-compatible owner as their predecessor. Stage topology, execution policy, and
-reclamation policy belong to the composition rather than to `RecordTape` or
-`Slider`.
-
-`NoOpModule` is the trivial always-successful module used to prove the minimal
-tract composition.
-
-RecordTape public value types live in
-`<fexma/record_tract/record_tape_types.hpp>`; physical WAL format and lifecycle
-types live in `<fexma/wal/types.hpp>`. RecordTape headers do not include the
-physical WAL types. The current RecordTape `default_alignment` and physical
-`wal_default_alignment` are both 64 but are independent defaults, not a shared
-contract.
-
-## Optional WAL Persistence
-
-Persistence is a specialized tract stage, not an intrinsic property of
-`RecordTape`. `Persistence<Predecessor>` owns its durability mechanics and
-terminal failure state for the current open writer lifetime. Its lifecycle is
-independent from the tape; a later successful `open()` starts a new writer
-lifetime and clears the previous failure state.
-
-`Persistence<Predecessor>` obtains its permitted boundary from its predecessor
-and owns a frontier representing durable progress. Unlike the generic
-per-record Slider, it appends a bounded batch, performs one OS-level physical
-sync, and publishes the durable frontier only after the complete batch has
-synchronized. `Persistence::GetFrontier()` is the exclusive end of the records
-whose required durability operation has succeeded.
-
-The default `PersistencePolicy::sync_count` is one. It is the maximum number of
-records appended and synchronized as one durability batch by a single
-`process()` call. `sync_count` must be greater than zero; passing zero is a
-bootstrap programmer error and is asserted in debug builds rather than
-normalized.
-
-One persistence composition can therefore be wired as:
-
-```text
-producer -> RecordTape::GetFrontier() -> Persistence<RecordTape>
-                                              |
-                                              v
-                                   durable GetFrontier() -> downstream stage
-```
-
-For that specific composition:
-
-```text
-tail <= durable <= head
-head - tail <= capacity
-```
-
-Here `durable` is the semantic name of the persistence stage's frontier, not a
-third boundary intrinsically owned by `RecordTape`. The composition reclaims
-positions only after every mandatory stage that protects retention has completed
-them and all borrowed views have been retired.
-
-`open()` creates only a new WAL file and never truncates an existing path. The
-physical file uses canonical little-endian headers and aligned record offsets.
-Its immutable identity binds one stream kind and ID to one epoch, manifest, and
-payload schema; runtime ring capacity is intentionally not persisted.
-
-`WalReader` opens an existing file only when its complete persisted identity
-matches the caller's expected configuration. It exposes a record only after
-validating physical headers, sequence, CRCs, payload, and zero padding.
-`scan_wal()` reports the longest trusted prefix without modifying the file.
-
-`recover_incomplete_tail()` is the separate, conservative mutation boundary.
-With exclusive ownership of a quiescent file, it may truncate only a physically
-incomplete trailing record to the scanner-proven trusted offset, synchronize
-that truncation, and validate the complete file again. Complete invalid records,
-middle corruption, sequence errors, and identity mismatches are refused without
-mutation.
-
-After crash, the maximal contiguous fully validated prefix is the authoritative
-WAL: every complete record in it participates in replay and rebuild regardless
-of client acknowledgement. Batches are live append-and-sync units only. The
-file contains no batch commit records or commit markers.
-
-Start with [CONTRACT.md](doc/CONTRACT.md), then see
-[DESIGN.md](doc/DESIGN.md) and [INVARIANTS.md](doc/INVARIANTS.md).
-The physical WAL layout is in [FILE_FORMAT.md](doc/FILE_FORMAT.md); build and
-test commands are in [BUILDING.md](doc/BUILDING.md).
-
-## Build And Test
-
-```sh
-cmake -S . -B build
-cmake --build build
-ctest --test-dir build --output-on-failure
-```
-
-Extracted from UglyPusher/ll_exp at commit 63681e8.
+The repository has no install or package-export rules.
