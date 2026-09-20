@@ -159,8 +159,11 @@ AccessResult RecordTape::try_view(Position position) const noexcept {
 
   const Position tail =
       tail_frontier_->load(std::memory_order_acquire);
-  if (position < tail) return {ViewStatus::Reclaimed};
   const Position head = head_boundary_.value.load(std::memory_order_acquire);
+  if (tail > head) [[unlikely]] {
+    std::terminate();
+  }
+  if (position < tail) return {ViewStatus::Reclaimed};
   if (position >= head) return {ViewStatus::Unpublished};
 
   const auto slot = static_cast<std::uint32_t>(position % capacity_);
