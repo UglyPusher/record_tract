@@ -51,9 +51,9 @@ namespace {
 
 } // namespace
 
-RecordTape::Storage::~Storage() { release(); }
+RecordTape::Buffer::~Buffer() { release(); }
 
-RecordTapeOpenStatus RecordTape::Storage::initialize(
+RecordTapeOpenStatus RecordTape::Buffer::initialize(
     const RecordTapeConfig& config) noexcept {
   std::size_t stride{};
   std::size_t size{};
@@ -72,12 +72,11 @@ RecordTapeOpenStatus RecordTape::Storage::initialize(
   }
   stride_ = stride;
   payload_size_ = config.payload_size;
-  capacity_ = config.capacity;
   std::memset(data_, 0, size_);
   return RecordTapeOpenStatus::Ok;
 }
 
-void RecordTape::Storage::release() noexcept {
+void RecordTape::Buffer::release() noexcept {
   if (data_ != nullptr) {
     ::operator delete(data_, std::align_val_t{alignment_});
   }
@@ -85,22 +84,16 @@ void RecordTape::Storage::release() noexcept {
   size_ = 0;
   stride_ = 0;
   payload_size_ = 0;
-  capacity_ = 0;
 }
 
 std::span<std::byte>
-RecordTape::Storage::block_at_slot(std::uint32_t slot) noexcept {
+RecordTape::Buffer::block_at_slot(std::uint32_t slot) noexcept {
   return {data_ + static_cast<std::size_t>(slot) * stride_, payload_size_};
 }
 
 std::span<const std::byte>
-RecordTape::Storage::block_at_slot(std::uint32_t slot) const noexcept {
+RecordTape::Buffer::block_at_slot(std::uint32_t slot) const noexcept {
   return {data_ + static_cast<std::size_t>(slot) * stride_, payload_size_};
-}
-
-std::uint32_t RecordTape::Storage::next_slot(std::uint32_t slot) const noexcept {
-  ++slot;
-  return slot == capacity_ ? 0 : slot;
 }
 
 RecordTape::RecordTape() noexcept : tail_frontier_(&head_boundary_.value) {}
@@ -118,11 +111,10 @@ RecordTape::open(const RecordTapeConfig& config) noexcept {
     return {RecordTapeOpenStatus::InvalidConfig};
   }
 
-  const RecordTapeOpenStatus storage_status = storage_.initialize(config);
-  if (storage_status != RecordTapeOpenStatus::Ok) return {storage_status};
+  const RecordTapeOpenStatus buffer_status = buffer_.initialize(config);
+  if (buffer_status != RecordTapeOpenStatus::Ok) return {buffer_status};
 
   config_ = config;
-  head_slot_ = 0;
   head_boundary_.value.store(0, std::memory_order_relaxed);
   open_.store(true, std::memory_order_release);
   return {RecordTapeOpenStatus::Ok};
@@ -142,9 +134,9 @@ RecordTape::try_publish(std::span<const std::byte> payload) noexcept {
     return {PublishStatus::PositionExhausted, 0};
   }
 
-  std::span<std::byte> block = storage_.block_at_slot(head_slot_);
+  const auto slot = static_cast<std::uint32_t>(head % config_.capacity);
+  std::span<std::byte> block = buffer_.block_at_slot(slot);
   std::memcpy(block.data(), payload.data(), payload.size());
-  head_slot_ = storage_.next_slot(head_slot_);
   head_boundary_.value.store(head + 1u, std::memory_order_release);
   return {PublishStatus::Ok, head};
 }
@@ -159,12 +151,12 @@ AccessResult RecordTape::try_view(Position position) const noexcept {
   if (position >= head) return {ViewStatus::Unpublished};
 
   const auto slot = static_cast<std::uint32_t>(position % config_.capacity);
-  return {ViewStatus::Ok, {position, storage_.block_at_slot(slot)}};
+  return {ViewStatus::Ok, {position, buffer_.block_at_slot(slot)}};
 }
 
 void RecordTape::close() noexcept {
   open_.store(false, std::memory_order_release);
-  storage_.release();
+  buffer_.release();
 }
 
 bool RecordTape::is_open() const noexcept {

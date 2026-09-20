@@ -80,13 +80,13 @@ private:
   static_assert(alignof(TapeBoundary) == cache_line_size);
   static_assert(sizeof(TapeBoundary) == cache_line_size);
 
-  class Storage final {
+  class Buffer final {
   public:
-    Storage() = default;
-    ~Storage();
+    Buffer() = default;
+    ~Buffer();
 
-    Storage(const Storage&) = delete;
-    Storage& operator=(const Storage&) = delete;
+    Buffer(const Buffer&) = delete;
+    Buffer& operator=(const Buffer&) = delete;
 
     [[nodiscard]] RecordTapeOpenStatus
     initialize(const RecordTapeConfig& config) noexcept;
@@ -96,14 +96,12 @@ private:
     block_at_slot(std::uint32_t slot) noexcept;
     [[nodiscard]] std::span<const std::byte>
     block_at_slot(std::uint32_t slot) const noexcept;
-    [[nodiscard]] std::uint32_t next_slot(std::uint32_t slot) const noexcept;
 
   private:
     std::byte* data_{};
     std::size_t size_{};
     std::size_t stride_{};
     std::uint32_t payload_size_{};
-    std::uint32_t capacity_{};
     std::uint32_t alignment_{default_alignment};
   };
 
@@ -111,8 +109,7 @@ private:
   // distinct cache-line storage.
   TapeBoundary head_boundary_{};
   const Frontier* tail_frontier_;
-  std::uint32_t head_slot_{};
-  Storage storage_{};
+  Buffer buffer_{};
   RecordTapeConfig config_{};
   std::atomic<bool> open_{false};
 };
