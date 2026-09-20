@@ -54,7 +54,7 @@ Execution policy preserves these traversal and publication invariants:
 
 - `read_count` partitions the observed predecessor range into internal passes;
   it does not limit the total records processed by one successful
-  `process_available()` call;
+  `process()` call;
 - with the current per-position zero-copy view path, changing a valid
   `read_count` does not change externally observable successful processing;
 - `publish_count` is the number of successful records between processed-frontier

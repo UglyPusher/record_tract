@@ -65,7 +65,7 @@ its own frontier. It owns no worker, polling loop, wait strategy, runtime
 topology, or domain semantics.
 
 `ExecutionPolicy::read_count` is the internal read-pass size;
-`process_available()` still drains the complete range visible in its single
+`process()` still drains the complete range visible in its single
 predecessor-frontier observation unless processing fails. With the current
 zero-copy `try_view(position)` path, read-pass boundaries do not change
 externally observable successful behavior. They are retained for read mechanics
@@ -132,7 +132,7 @@ whose required durability operation has succeeded.
 
 The default `PersistencePolicy::sync_count` is one. It is the maximum number of
 records appended and synchronized as one durability batch by a single
-`process_available()` call; zero is normalized to the default of one.
+`process()` call; zero is normalized to the default of one.
 
 One persistence composition can therefore be wired as:
 

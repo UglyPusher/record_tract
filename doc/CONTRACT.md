@@ -55,8 +55,8 @@ NoOpModule second_module;
 Slider first(tape, first_module);
 Slider second(tape, first, second_module);
 
-SliderResult first_result = first.process_available();
-SliderResult second_result = second.process_available();
+SliderResult first_result = first.process();
+SliderResult second_result = second.process();
 Position visible_downstream = second.GetFrontier();
 ```
 
@@ -73,7 +73,7 @@ not be a Slider. The separately supplied `RecordTape` remains the source of
 record data. A root Slider uses the tape itself as predecessor, while a
 downstream Slider may use another Slider as shown above.
 
-`process_available()` is one synchronous call. It snapshots
+`process()` is one synchronous call. It snapshots
 `predecessor.GetFrontier()`, obtains every consecutive immutable `RecordView`
 from the source tape through that exclusive end, and calls
 `module.process(record)`. The module returns `true` only after processing that
@@ -92,7 +92,7 @@ struct ExecutionPolicy final {
 
 `read_count` is the internal read-pass size. It partitions the traversal of the
 single observed predecessor range; it is not a maximum record count for
-`process_available()` and is not a yield or scheduling quantum. The current
+`process()` and is not a yield or scheduling quantum. The current
 source path obtains one zero-copy borrowed `RecordView` at a time through
 `RecordTape::try_view()`, so read-pass boundaries currently do not change
 externally observable successful behavior. The pass structure is retained for
@@ -171,7 +171,7 @@ public:
   bool is_open() const noexcept;
   bool failed() const noexcept;
 
-  SliderResult process_available() noexcept;
+  SliderResult process() noexcept;
   Position GetFrontier() const noexcept;
   Position current() const noexcept;
 };
@@ -393,7 +393,7 @@ operationally tested condition.
 
 ## Persistence Progress
 
-`Persistence<Predecessor>::process_available()` reads its permitted boundary
+`Persistence<Predecessor>::process()` reads its permitted boundary
 from `predecessor.GetFrontier()` and selects at most its configured
 `sync_count` from `[durable, permitted boundary)`. A configured `sync_count` of
 zero is normalized to the default count of one. An empty selection performs no

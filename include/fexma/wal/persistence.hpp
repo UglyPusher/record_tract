@@ -84,7 +84,7 @@ public:
   [[nodiscard]] bool is_open() const noexcept { return core_.is_open(); }
   [[nodiscard]] bool failed() const noexcept { return core_.failed(); }
 
-  [[nodiscard]] SliderResult process_available() noexcept {
+  [[nodiscard]] SliderResult process() noexcept {
     const Position available_end =
         upstream_frontier_->load(std::memory_order_acquire);
     return core_.process_until(available_end);

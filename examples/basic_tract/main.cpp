@@ -81,7 +81,7 @@ int main() {
     for (;;) {
       if (failed.load(std::memory_order_acquire)) return;
 
-      const core::SliderResult result = slider.process_available();
+      const core::SliderResult result = slider.process();
       if (!result.ok()) {
         failed.store(true, std::memory_order_release);
         return;

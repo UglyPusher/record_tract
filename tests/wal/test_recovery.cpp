@@ -77,7 +77,7 @@ payload(std::uint64_t value) noexcept {
       return false;
     }
   }
-  const SliderResult processed = persistence.process_available();
+  const SliderResult processed = persistence.process();
   return (records == 0 ? processed.status == SliderStatus::Empty
                        : processed.status == SliderStatus::Processed) &&
          persistence.close();

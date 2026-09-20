@@ -50,7 +50,7 @@ public:
       : source_(source), upstream_frontier_(&upstream_frontier), module_(module),
         policy_(normalize(policy)) {}
 
-  [[nodiscard]] SliderResult process_available() noexcept {
+  [[nodiscard]] SliderResult process() noexcept {
     Position current = frontier_.load(std::memory_order_acquire);
 
     const Position available_end =

@@ -73,7 +73,7 @@ using Payload = std::array<std::byte, 16>;
     return false;
   }
 
-  const SliderResult processed = slider.process_available();
+  const SliderResult processed = slider.process();
   if (processed.status != SliderStatus::Processed ||
       processed.processed_count != capacity ||
       read_frontier(slider.GetFrontier()) != capacity ||
@@ -81,7 +81,7 @@ using Payload = std::array<std::byte, 16>;
     return false;
   }
 
-  const SliderResult wrapped = slider.process_available();
+  const SliderResult wrapped = slider.process();
   if (!wrapped.ok() || wrapped.current != capacity + 1) {
     return false;
   }
@@ -103,7 +103,7 @@ using Payload = std::array<std::byte, 16>;
     return false;
   }
 
-  if (!slider.process_available().ok() || tape.tail() != 2 ||
+  if (!slider.process().ok() || tape.tail() != 2 ||
       tape.try_view(0).status != ViewStatus::Reclaimed ||
       !publish(tape, 2)) {
     return false;
@@ -114,7 +114,7 @@ using Payload = std::array<std::byte, 16>;
     return false;
   }
 
-  if (!slider.process_available().ok() ||
+  if (!slider.process().ok() ||
       read_frontier(slider.GetFrontier()) != 3 || tape.tail() != 3) {
     return false;
   }
@@ -184,7 +184,7 @@ private:
   std::thread consumer([&] {
     while (slider.current() < message_count) {
       if (failed.load(std::memory_order_acquire)) return;
-      const SliderResult result = slider.process_available();
+      const SliderResult result = slider.process();
       if (result.status == SliderStatus::Processed) {
         const Position published = read_frontier(slider.GetFrontier());
         if (published != slider.current() || published > tape.head() ||

@@ -29,7 +29,7 @@ to its internally owned frontier. The caller owns repeated execution and all
 waiting or scheduling.
 
 `ExecutionPolicy::read_count` partitions that traversal into internal read
-passes. It does not bound the total work of `process_available()`: absent
+passes. It does not bound the total work of `process()`: absent
 failure, the call drains the complete range from its one predecessor-frontier
 observation. Because the current tape path borrows one zero-copy `RecordView` at
 a time, the pass size has no externally observable effect on successful
@@ -154,7 +154,7 @@ again; it never repairs, skips, or resynchronizes around corruption.
 ### Persistence Walkthrough
 
 The composition sets the persistence stage's `sync_count` and invokes
-`process_available()`. The stage reads its permitted boundary from
+`process()`. The stage reads its permitted boundary from
 `predecessor.GetFrontier()`; a zero `sync_count` is normalized to the default
 count of one. It obtains each selected `RecordView` from its separately supplied
 `RecordTape`, appends the batch, requests one sync, and publishes the range end

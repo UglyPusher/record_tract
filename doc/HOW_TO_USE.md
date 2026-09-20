@@ -75,9 +75,9 @@ core::Slider<core::RecordTape, Module> slider(tape, module);
 
 The Slider stores references to the tape, predecessor, and module. Each of
 those objects must outlive the Slider. Only one runtime executor may mutate a
-given Slider by calling `process_available()`.
+given Slider by calling `process()`.
 
-`process_available()` is synchronous. `SliderResult::ok()` is true for both
+`process()` is synchronous. `SliderResult::ok()` is true for both
 `SliderStatus::Processed` and `SliderStatus::Empty`; `Empty` means that the
 predecessor frontier had no new records at the observation point. Other Slider
 statuses are failures for this minimal example.
@@ -90,7 +90,7 @@ by the module. A position `p` is protected until the Slider has published at
 least `p + 1`.
 
 The Slider executor is also the sole reclaimer in this one-stage topology. It
-calls `reclaim(slider.GetFrontier())` only after `process_available()` returns;
+calls `reclaim(slider.GetFrontier())` only after `process()` returns;
 that return retires the Slider's borrowed views. Publishing the Slider frontier
 alone does not release storage.
 
