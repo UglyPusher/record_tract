@@ -96,7 +96,7 @@ public:
   [[nodiscard]] const Frontier& GetFrontier() const noexcept { return frontier_; }
 
   [[nodiscard]] Position current() const noexcept {
-    return GetFrontier().load(std::memory_order_acquire);
+    return frontier_.load(std::memory_order_acquire);
   }
   // Cold-path initialization: process_available() must not be active.
   void reset_quiescent(Position initial) noexcept {
