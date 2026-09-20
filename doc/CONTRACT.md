@@ -102,8 +102,7 @@ such a path today.
 `publish_count` is the processed-frontier publication batch size. After that
 many successful module calls, Slider release-publishes the next exclusive end.
 A residual successful prefix is published before successful return and before
-an existing module/view failure return. The failed or unavailable position is
-never included.
+an existing module failure return. The failed position is never included.
 
 Both `ExecutionPolicy` fields are bootstrap preconditions and must be greater
 than zero. Passing zero is a programmer error; debug builds assert this
@@ -115,10 +114,10 @@ precondition and the supplied policy is preserved without normalization:
 
 The slider owns no thread, scheduling loop, wait/spin/yield behavior, runtime
 registry, virtual dispatch, neighbor type, persistence operation, or snapshot
-interpretation. Calling and retry cadence belongs to the composition. A
-`ViewUnavailable` result indicates a violated upstream/retention composition
-contract or lifecycle transition; the slider does not reclaim `RecordTape`
-storage.
+interpretation. Calling and retry cadence belongs to the composition. Upstream
+frontier regression or failure to obtain a view inside the permitted range
+violates the tract topology, publication, or lifecycle invariant and terminates
+processing rather than producing a runtime status.
 
 ## Module Contract
 
@@ -396,6 +395,10 @@ from `predecessor.GetFrontier()` and selects at most its configured
 `sync_count` from `[durable, permitted boundary)`. `sync_count` must be greater
 than zero; passing zero is a programmer error asserted during bootstrap rather
 than normalized. An empty selection performs no physical sync.
+
+Upstream frontier regression or failure to obtain a source view inside that
+range violates the tract invariant and terminates processing rather than
+producing a runtime status.
 
 For a non-empty batch the physical writer:
 

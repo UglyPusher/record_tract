@@ -13,6 +13,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 
 namespace fexma::wal {
 
@@ -24,7 +25,6 @@ struct ExecutionPolicy final {
 enum class SliderStatus : std::uint8_t {
   Processed,
   Empty,
-  ViewUnavailable,
   ModuleFailed
 };
 
@@ -48,6 +48,9 @@ public:
 
     const Position available_end =
         upstream_frontier_->load(std::memory_order_acquire);
+    if (available_end < current) [[unlikely]] {
+      std::terminate();
+    }
     if (available_end == current) {
       return SliderStatus::Empty;
     }
@@ -58,9 +61,8 @@ public:
           current + std::min<Position>(policy_.read_count, available_end - current);
       while (current < pass_end) {
         const AccessResult access = source_.try_view(current);
-        if (!access.ok()) {
-          flush(current, since_publish);
-          return SliderStatus::ViewUnavailable;
+        if (!access.ok()) [[unlikely]] {
+          std::terminate();
         }
         if (!module_.process(access.record)) {
           flush(current, since_publish);

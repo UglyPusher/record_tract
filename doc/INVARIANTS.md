@@ -60,8 +60,8 @@ Execution policy preserves these traversal and publication invariants:
 - `publish_count` is the number of successful records between processed-frontier
   publications;
 - a final successful residual prefix is published before return;
-- a successful residual prefix before module or view failure is published, but
-  the failed or unavailable position is not;
+- a successful residual prefix before module failure is published, but the
+  failed position is not;
 - `read_count` and `publish_count` are bootstrap preconditions and must both be
   greater than zero; passing zero is a programmer error and is asserted in
   debug builds rather than normalized.

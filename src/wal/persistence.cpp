@@ -9,6 +9,7 @@
 #include "physical_wal_adapter.hpp"
 
 #include <cassert>
+#include <exception>
 #include <limits>
 #include <new>
 
@@ -83,6 +84,9 @@ bool detail::PersistenceCore::failed() const noexcept {
 SliderStatus detail::PersistenceCore::process_until(Position available_end) noexcept {
   Position current =
       GetFrontier().load(std::memory_order_acquire);
+  if (available_end < current) [[unlikely]] {
+    std::terminate();
+  }
   if (available_end == current) {
     return SliderStatus::Empty;
   }
@@ -94,8 +98,8 @@ SliderStatus detail::PersistenceCore::process_until(Position available_end) noex
   const Position batch_end = current + count;
   while (current < batch_end) {
     const AccessResult access = source_.try_view(current);
-    if (!access.ok()) {
-      return SliderStatus::ViewUnavailable;
+    if (!access.ok()) [[unlikely]] {
+      std::terminate();
     }
     if (!append(access.record)) {
       return SliderStatus::ModuleFailed;

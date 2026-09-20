@@ -116,18 +116,6 @@ bool respects_upstream_and_retries_module_failure() {
   upstream.store(3, std::memory_order_release); const SliderStatus last=slider.process(); return last==SliderStatus::Processed&&read_frontier(slider.GetFrontier())==3;
 }
 
-bool reports_unavailable_views_without_publication() {
-  Frontier terminal{};
-  RecordTape tape;
-  tape.SetTailRef(terminal);
-  Frontier upstream{1}; RecordingModule module; Slider reclaimed(tape,upstream,module);
-  if(!open_tape(tape)||!publish(tape,1)) return false;
-  terminal.store(1, std::memory_order_release);
-  const SliderStatus rr=reclaimed.process(); if(rr!=SliderStatus::ViewUnavailable||read_frontier(reclaimed.GetFrontier())!=0) return false;
-  RecordTape second; Frontier second_terminal{}; second.SetTailRef(second_terminal); if(!open_tape(second)) return false; Frontier ahead{1}; RecordingModule second_module; Slider unpublished(second,ahead,second_module); const SliderStatus ur=unpublished.process();
-  return ur==SliderStatus::ViewUnavailable&&read_frontier(unpublished.GetFrontier())==0&&second_module.count()==0;
-}
-
 bool execution_policy_preserves_default_and_supports_batches() {
   RecordTape tape;
   RecordingModule explicit_default;
@@ -231,10 +219,9 @@ int main() {
   if (!processes_available_range_in_order()) return 1;
   if (!chained_sliders_use_explicit_frontiers()) return 2;
   if (!respects_upstream_and_retries_module_failure()) return 3;
-  if (!reports_unavailable_views_without_publication()) return 4;
-  if (!execution_policy_preserves_default_and_supports_batches()) return 5;
-  if (!execution_policy_read_count_does_not_limit_one_call()) return 6;
-  if (!execution_policy_publishes_cadence_and_partial_progress()) return 7;
-  if (!execution_policy_flushes_residual_before_failure()) return 8;
+  if (!execution_policy_preserves_default_and_supports_batches()) return 4;
+  if (!execution_policy_read_count_does_not_limit_one_call()) return 5;
+  if (!execution_policy_publishes_cadence_and_partial_progress()) return 6;
+  if (!execution_policy_flushes_residual_before_failure()) return 7;
   return 0;
 }

@@ -39,9 +39,9 @@ later need bounded materialization, without specifying such a path now.
 `ExecutionPolicy::publish_count` controls release-publication cadence for the
 Slider-owned frontier. Complete publication batches are published during the
 call; final successful residual progress and a successful residual prefix before
-failure are flushed before return. Both policy fields must be greater than zero;
-debug builds assert this bootstrap precondition rather than normalizing the
-policy.
+module failure are flushed before return. Both policy fields must be greater
+than zero; debug builds assert this bootstrap precondition rather than
+normalizing the policy.
 
 A module owns processing semantics. The generic slider requires only synchronous
 `process(const RecordView&)` success or failure; it does not know what the
