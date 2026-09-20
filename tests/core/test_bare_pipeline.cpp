@@ -1,10 +1,10 @@
 /**
- * @file test_wal_bare_pipeline.cpp
- * @brief Sequential and concurrent proof of the bare WAL slider pipeline.
+ * @file test_bare_pipeline.cpp
+ * @brief Sequential and concurrent proof of the bare Record Tract pipeline.
  */
 
-#include <fexma/wal/noop_module.hpp>
-#include <fexma/wal/slider.hpp>
+#include <fexma/record_tract/noop_module.hpp>
+#include <fexma/record_tract/slider.hpp>
 
 #include <array>
 #include <atomic>
@@ -13,9 +13,13 @@
 #include <span>
 #include <thread>
 
-using namespace fexma::wal;
+using namespace fexma::record_tract;
 
 namespace {
+
+[[nodiscard]] Position read_frontier(const Frontier& frontier) noexcept {
+  return frontier.load(std::memory_order_acquire);
+}
 
 using Payload = std::array<std::byte, 16>;
 
@@ -50,9 +54,12 @@ using Payload = std::array<std::byte, 16>;
 [[nodiscard]] bool stopped_slider_preserves_backpressure() {
   constexpr Position capacity = 3;
   RecordTape tape;
-  if (!tape.open({static_cast<std::uint32_t>(sizeof(Payload)),
-                 static_cast<std::uint32_t>(capacity), default_alignment})
-           .ok()) {
+  NoOpModule module;
+  Slider slider(tape, tape.GetFrontier(), module);
+  tape.SetTailRef(slider.GetFrontier());
+  if (tape.open({static_cast<std::uint32_t>(sizeof(Payload)),
+                static_cast<std::uint32_t>(capacity), default_alignment}) !=
+      RecordTapeOpenStatus::Ok) {
     return false;
   }
 
@@ -66,75 +73,47 @@ using Payload = std::array<std::byte, 16>;
     return false;
   }
 
-  Frontier no_op_frontier;
-  NoOpModule module;
-  Slider slider(tape, no_op_frontier, module);
-
-  const SliderResult processed = slider.process_available();
-  if (processed.status != SliderStatus::Processed ||
-      processed.processed_count != capacity ||
-      no_op_frontier.acquire() != capacity || tape.tail() != 0 ||
-      tape.try_publish(std::span<const std::byte>{blocked_payload}).status !=
-          PublishStatus::Full) {
+  const SliderStatus processed = slider.process();
+  if (processed != SliderStatus::Processed ||
+      read_frontier(slider.GetFrontier()) != capacity ||
+      tape.tail() != capacity || !publish(tape, capacity)) {
     return false;
   }
 
-  if (tape.reclaim(no_op_frontier.acquire()) != ReclaimStatus::Ok ||
-      !publish(tape, capacity)) {
-    return false;
-  }
-  const SliderResult wrapped = slider.process_available();
-  if (!wrapped.ok() || wrapped.current != capacity + 1 ||
-      tape.reclaim(no_op_frontier.acquire()) != ReclaimStatus::Ok) {
+  const SliderStatus wrapped = slider.process();
+  if (wrapped != SliderStatus::Processed) {
     return false;
   }
 
   return tape.tail() == capacity + 1 &&
-         no_op_frontier.acquire() == tape.tail() &&
+         read_frontier(slider.GetFrontier()) == tape.tail() &&
          tape.head() == tape.tail();
 }
 
-[[nodiscard]] bool retains_slots_until_composition_reclaims() {
+[[nodiscard]] bool terminal_frontier_releases_slots() {
   RecordTape tape;
-  if (!tape.open({static_cast<std::uint32_t>(sizeof(Payload)), 2,
-                 default_alignment})
-           .ok() ||
+  NoOpModule module;
+  Slider slider(tape, tape.GetFrontier(), module);
+  tape.SetTailRef(slider.GetFrontier());
+  if (tape.open({static_cast<std::uint32_t>(sizeof(Payload)), 2,
+                default_alignment}) != RecordTapeOpenStatus::Ok ||
       !publish(tape, 0) || !publish(tape, 1)) {
     return false;
   }
 
-  const AccessResult before = tape.try_view(0);
-  if (!before.ok() || !equal(before.record.payload, payload(0))) return false;
-  const std::byte* const first_address = before.record.payload.data();
-
-  Frontier no_op_frontier;
-  NoOpModule module;
-  Slider slider(tape, no_op_frontier, module);
-  if (!slider.process_available().ok()) return false;
-
-  const AccessResult retained = tape.try_view(0);
-  const Payload third = payload(2);
-  if (!retained.ok() || retained.record.payload.data() != first_address ||
-      !equal(retained.record.payload, payload(0)) || tape.tail() != 0 ||
-      tape.try_publish(std::span<const std::byte>{third}).status !=
-          PublishStatus::Full) {
+  if (slider.process() != SliderStatus::Processed || tape.tail() != 2 ||
+      tape.try_view(0).status != ViewStatus::Reclaimed ||
+      !publish(tape, 2)) {
     return false;
   }
 
-  // No borrowed view of position 0 is used after this reclamation.
-  if (tape.reclaim(1) != ReclaimStatus::Ok || !publish(tape, 2) ||
-      tape.try_view(0).status != ViewStatus::Reclaimed) {
-    return false;
-  }
   const AccessResult replacement = tape.try_view(2);
-  if (!replacement.ok() || replacement.record.payload.data() != first_address ||
-      !equal(replacement.record.payload, payload(2))) {
+  if (!replacement.ok() || !equal(replacement.record.payload, payload(2))) {
     return false;
   }
 
-  if (!slider.process_available().ok() ||
-      no_op_frontier.acquire() != 3 ||
-      tape.reclaim(no_op_frontier.acquire()) != ReclaimStatus::Ok) {
+  if (slider.process() != SliderStatus::Processed ||
+      read_frontier(slider.GetFrontier()) != 3 || tape.tail() != 3) {
     return false;
   }
   return tape.tail() == 3 && tape.head() == 3;
@@ -166,15 +145,14 @@ private:
   constexpr std::uint32_t capacity = 127;
 
   RecordTape tape;
-  if (!tape.open({static_cast<std::uint32_t>(sizeof(Payload)), capacity,
-                 default_alignment})
-           .ok()) {
+  OrderedProbeModule module;
+  Slider slider(tape, tape.GetFrontier(), module);
+  tape.SetTailRef(slider.GetFrontier());
+  if (tape.open({static_cast<std::uint32_t>(sizeof(Payload)), capacity,
+                default_alignment}) != RecordTapeOpenStatus::Ok) {
     return false;
   }
 
-  Frontier no_op_frontier;
-  OrderedProbeModule module;
-  Slider slider(tape, no_op_frontier, module);
   std::atomic<bool> failed{false};
   std::atomic<bool> producer_done{false};
 
@@ -203,15 +181,15 @@ private:
   std::thread consumer([&] {
     while (slider.current() < message_count) {
       if (failed.load(std::memory_order_acquire)) return;
-      const SliderResult result = slider.process_available();
-      if (result.status == SliderStatus::Processed) {
-        const Position published = no_op_frontier.acquire();
+      const SliderStatus result = slider.process();
+      if (result == SliderStatus::Processed) {
+        const Position published = read_frontier(slider.GetFrontier());
         if (published != slider.current() || published > tape.head() ||
-            tape.reclaim(published) != ReclaimStatus::Ok) {
+            tape.tail() != published) {
           failed.store(true, std::memory_order_release);
           return;
         }
-      } else if (result.status == SliderStatus::Empty) {
+      } else if (result == SliderStatus::Empty) {
         if (producer_done.load(std::memory_order_acquire) &&
             slider.current() != message_count) {
           failed.store(true, std::memory_order_release);
@@ -230,7 +208,7 @@ private:
 
   return !failed.load(std::memory_order_acquire) && module.valid() &&
          module.count() == message_count && tape.tail() == message_count &&
-         no_op_frontier.acquire() == message_count &&
+      read_frontier(slider.GetFrontier()) == message_count &&
          tape.head() == message_count;
 }
 
@@ -238,7 +216,7 @@ private:
 
 int main() {
   if (!stopped_slider_preserves_backpressure()) return 1;
-  if (!retains_slots_until_composition_reclaims()) return 2;
+  if (!terminal_frontier_releases_slots()) return 2;
   if (!producer_and_slider_wrap_concurrently()) return 3;
   return 0;
 }

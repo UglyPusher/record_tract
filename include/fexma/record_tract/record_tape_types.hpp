@@ -7,15 +7,17 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
 #include <span>
 
-namespace fexma::wal {
+namespace fexma::record_tract {
 
 // RecordTape storage alignment. Physical WAL alignment is independent and is
 // declared with the physical WAL configuration types.
 inline constexpr std::uint32_t default_alignment = 64;
 
 using Position = std::uint64_t; // Absolute zero-based RecordTape position.
+using Frontier = std::atomic<Position>;
 
 enum class ViewStatus : std::uint8_t {
   Ok,
@@ -53,4 +55,4 @@ struct PublishResult {
   }
 };
 
-} // namespace fexma::wal
+} // namespace fexma::record_tract

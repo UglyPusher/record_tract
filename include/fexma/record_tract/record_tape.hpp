@@ -5,14 +5,14 @@
  * @brief Bounded in-memory RecordTape with head and tail boundaries.
  */
 
-#include <fexma/wal/record_tape_types.hpp>
+#include <fexma/record_tract/record_tape_types.hpp>
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <span>
 
-namespace fexma::wal {
+namespace fexma::record_tract {
 
 struct RecordTapeConfig {
   std::uint32_t payload_size{};
@@ -27,20 +27,6 @@ enum class RecordTapeOpenStatus : std::uint8_t {
   AlreadyOpen
 };
 
-struct RecordTapeOpenResult {
-  RecordTapeOpenStatus status{RecordTapeOpenStatus::InvalidConfig};
-
-  [[nodiscard]] bool ok() const noexcept {
-    return status == RecordTapeOpenStatus::Ok;
-  }
-};
-
-enum class ReclaimStatus : std::uint8_t {
-  Ok,
-  Closed,
-  InvalidPosition
-};
-
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4324) // Intentional cache-line boundary isolation.
@@ -48,7 +34,7 @@ enum class ReclaimStatus : std::uint8_t {
 
 class RecordTape final {
 public:
-  RecordTape() = default;
+  RecordTape() noexcept;
   ~RecordTape();
 
   RecordTape(const RecordTape&) = delete;
@@ -56,41 +42,46 @@ public:
   RecordTape(RecordTape&&) = delete;
   RecordTape& operator=(RecordTape&&) = delete;
 
-  [[nodiscard]] RecordTapeOpenResult
+  [[nodiscard]] RecordTapeOpenStatus
   open(const RecordTapeConfig& config) noexcept;
   [[nodiscard]] PublishResult
   try_publish(std::span<const std::byte> payload) noexcept;
   [[nodiscard]] AccessResult try_view(Position position) const noexcept;
 
-  // end is exclusive. The composition must ensure all mandatory readers have
-  // finished every position below end before the sole reclaimer calls this.
-  [[nodiscard]] ReclaimStatus reclaim(Position end) noexcept;
+  // Cold-path topology wiring. The terminal frontier must outlive the tape.
+  void SetTailRef(const Frontier& frontier) noexcept;
 
-  // Cold-path lifecycle: producer, reclaimer, and view users must be stopped.
+  // Cold-path lifecycle: producer, terminal stage, and view users must be stopped.
   void close() noexcept;
 
   [[nodiscard]] bool is_open() const noexcept;
   [[nodiscard]] Position head() const noexcept;
+  [[nodiscard]] std::uint32_t payload_size() const noexcept {
+    return payload_size_;
+  }
+  [[nodiscard]] const Frontier& GetFrontier() const noexcept {
+    return head_boundary_.value;
+  }
   [[nodiscard]] Position tail() const noexcept;
 
 private:
   static constexpr std::size_t cache_line_size = 64;
 
   struct alignas(cache_line_size) TapeBoundary {
-    std::atomic<Position> value{0};
+    Frontier value{};
   };
 
   static_assert(std::atomic<Position>::is_always_lock_free);
   static_assert(alignof(TapeBoundary) == cache_line_size);
   static_assert(sizeof(TapeBoundary) == cache_line_size);
 
-  class Storage final {
+  class Buffer final {
   public:
-    Storage() = default;
-    ~Storage();
+    Buffer() = default;
+    ~Buffer();
 
-    Storage(const Storage&) = delete;
-    Storage& operator=(const Storage&) = delete;
+    Buffer(const Buffer&) = delete;
+    Buffer& operator=(const Buffer&) = delete;
 
     [[nodiscard]] RecordTapeOpenStatus
     initialize(const RecordTapeConfig& config) noexcept;
@@ -100,29 +91,27 @@ private:
     block_at_slot(std::uint32_t slot) noexcept;
     [[nodiscard]] std::span<const std::byte>
     block_at_slot(std::uint32_t slot) const noexcept;
-    [[nodiscard]] std::uint32_t next_slot(std::uint32_t slot) const noexcept;
 
   private:
     std::byte* data_{};
-    std::size_t size_{};
     std::size_t stride_{};
     std::uint32_t payload_size_{};
-    std::uint32_t capacity_{};
     std::uint32_t alignment_{default_alignment};
   };
 
   // Each boundary is a complete cache line; adjacent members therefore have
-  // distinct cache-line storage and cannot share the producer/reclaimer line.
-  TapeBoundary tail_boundary_{};
+  // distinct cache-line storage.
   TapeBoundary head_boundary_{};
-  std::uint32_t head_slot_{};
-  Storage storage_{};
-  RecordTapeConfig config_{};
+  const Frontier* tail_frontier_;
+  Buffer buffer_{};
+  std::uint32_t payload_size_{};
+  std::uint32_t capacity_{};
   std::atomic<bool> open_{false};
+  bool opened_once_{false};
 };
 
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #endif
 
-} // namespace fexma::wal
+} // namespace fexma::record_tract

@@ -1,143 +1,150 @@
-# WAL Invariants
+# Record Tract Invariants
 
-## RecordTape Frontier Order
+## Topology
 
-`RecordTape` intrinsically owns only two monotonic absolute zero-based
-boundaries:
+The supported topology is a linear ordered chain:
+
+```text
+Head Frontier -> Stage Frontier -> ... -> terminal Frontier == Tail
+```
+
+There is no branching, DAG, topology registry, or separate Tail publication
+atomic.
+
+Topology wiring is completed before `RecordTape::open()` and is immutable during
+runtime. `SetTailRef()` after open is a programmer/lifecycle error. Every
+stored Frontier reference must outlive the object observing it.
+
+## RecordTape boundaries
+
+`RecordTape` owns a bounded preallocated ring with these boundaries:
 
 ```text
 tail <= head
 head - tail <= capacity
 ```
 
+- Head is published only by the single producer.
 - `[tail, head)` contains published retained positions.
-- `[head, tail + capacity)` is free capacity.
-- Only the producer writes `head`.
-- Only the composition/reclaimer writes `tail`.
-- `reclaim(end)` cannot move backward or beyond observed `head`.
-- The composition advances `tail` only after every mandatory reader has
-  finished the reclaimed positions.
+- `tail` is an acquire observation of the terminal stage Frontier.
+- Producer reuse is allowed only after the terminal Frontier has passed the
+  old position.
+- A zero-stage Tape observes its own Head, so `Tail == Head`.
 
-`RecordTape` contains no `durable` frontier, file writer, or persistence failure
-state.
+`RecordTape` maps an absolute Position to `position % capacity` only after
+checking the absolute range. The nested `Buffer` owns aligned allocation and
+slot layout; it does not own ring progress.
 
-## Slider Frontier
+## Frontier ownership
 
-The own Frontier is the slider's single authoritative current exclusive end:
-
-```text
-own frontier <= observed upstream frontier
-```
-
-- The upstream reference is const and therefore read-only.
-- Only the slider holding its own non-const frontier reference publishes it.
-- A range must begin at the own Frontier value acquired at entry and end no
-  later than the acquired upstream frontier.
-- A record view is obtained by its absolute zero-based position.
-- The module must complete position `p` successfully before the own Frontier
-  becomes `p + 1`.
-- Own frontier publication occurs only after successful module completion.
-- Release publication of exclusive end `p + 1` makes module output for
-  position `p` visible to an acquire-reading downstream stage.
-- The composition may reclaim only through the last mandatory published
-  frontier and only after all borrowed views have been retired.
-
-The slider mechanics allocate no storage, copy no payload, interpret no
-record kind, and perform no persistence, snapshot I/O, waiting, or scheduling.
-
-For the bare linear composition:
+Each stage owns exactly one mutable Frontier and exposes only a read-only view
+to downstream composition. A Frontier value `N` means:
 
 ```text
-tail <= NoOpF <= head
+all positions < N are complete for that owner
+the owner retains no views/references to those positions
 ```
 
-Publication of `NoOpF` certifies module completion but does not reclaim a
-position. Only the composition writes `tail`, after the corresponding slider
-call has returned and its borrowed views are retired. Stopping either slider
-execution or composition reclamation therefore preserves bounded
-backpressure.
+The Slider owns its own Frontier and receives only `const Frontier&` upstream.
+Persistence owns its durable Frontier and receives only `const Frontier&`
+upstream. No stage obtains upstream progress through an upstream object.
 
-## Persistence Composition Frontier Order
-
-A composition may maintain three frontiers while `durable` is owned by
-`PersistenceSlider`:
+For a stage:
 
 ```text
-tail <= durable <= head
-head - tail <= capacity
+current_frontier <= upstream_frontier <= head
 ```
 
-- `[tail, durable)` is available to a downstream stage.
-- `[durable, head)` is published but not yet durable.
-- `[tail, head)` is accessible through read-only `try_view()` under the
-  caller-owned retention contract; availability does not prove durability.
-- `[head, tail + capacity)` is free capacity.
-- Position `p` maps to block `p % capacity`.
+It may process only `[current_frontier, upstream_frontier)`. A regression or a
+failed view in a correctly composed tract is a broken invariant and fails fast.
 
-Only the producer writes `head`, only `PersistenceSlider` writes `durable`, and
-only the composition reclaimer writes `tail`.
+## Publication ordering
 
-## Ownership
+For each producer/stage handoff:
 
-- A free block is owned by the producer while it fills the payload.
-- Publication of `head` transfers the immutable block to the pending range.
-- `PersistenceModule` borrows pending blocks without modifying them and appends
-  their immutable contents to physical storage.
-- Publication of `durable` makes the block available to the consumer.
-- The consumer owns the block while copying its payload.
-- Publication of `tail` releases the block for producer reuse.
+1. producer writes the payload;
+2. producer publishes Head with release semantics;
+3. stage acquires the upstream Frontier before using the record;
+4. stage completes its work and publishes its Frontier with release semantics;
+5. downstream stage acquires that Frontier;
+6. terminal Frontier publication is acquired by the producer before slot reuse.
 
-A block cannot be overwritten until `tail` passes its previous absolute
-position.
+No `seq_cst` operation is required. These guarantees assume one producer per
+Tape, one runtime executor per Slider/Persistence, and quiescent lifecycle
+operations.
 
-Borrowed view readers do not own or advance a frontier. Before obtaining a view
-and throughout its use, they must ensure reclamation cannot pass its position.
-The view neither pins the slot nor survives close/destruction/reopen. Absolute
-range validation precedes slot mapping, preventing a reclaimed position from
-being interpreted as the new record in a reused slot under this contract.
+## Borrowed views
 
-## Publication Order
+`RecordTape::try_view()` is a direct non-owning access API. `ViewStatus` remains
+valid for direct callers:
+
+- `Closed` — Tape is not open;
+- `Reclaimed` — position is below Tail;
+- `Unpublished` — position is at or beyond Head;
+- `Ok` — position is retained and published.
+
+The returned span does not pin a slot or register a reader. A caller must keep
+the terminal Frontier from passing the position while the view is in use. A
+Slider or Persistence receiving `Closed`, `Reclaimed`, or `Unpublished` means
+the tract invariant was broken; those stages terminate instead of returning a
+runtime status.
+
+## Slider policy and status
+
+`ExecutionPolicy::read_count` and `publish_count` must be greater than zero.
+They are bootstrap preconditions, not normalization inputs. `read_count` only
+partitions internal traversal. `publish_count` controls Frontier publication
+cadence. A module must complete a position before the Slider publishes the next
+exclusive Frontier value.
+
+Valid Slider outcomes are:
+
+- `Processed` — progress was published;
+- `Empty` — no new upstream progress was observed;
+- `ModuleFailed` — the module returned failure.
+
+Broken frontier, view, and lifecycle invariants are not runtime outcomes.
+
+## Persistence durability
 
 ```text
-producer --head--> durability writer --durable--> consumer --tail--> producer
+RecordTape / upstream Frontier -> Persistence -> PhysicalWalAdapter
 ```
 
-- Payload copy happens before `head.store(..., release)`.
-- Retained view access acquires `head` before exposing payload bytes.
-- Durability acquires `head` before reading pending blocks.
-- Record append and physical sync happen before
-  the persistence slider's `durable.store(..., release)`.
-- Consumer acquires `durable` before reading a block.
-- Consumer copy happens before `tail.store(..., release)`.
-- Producer acquires `tail` before reusing capacity.
+The source Tape is open before Persistence bootstrap. Payload size comes from
+the Tape. Physical WAL geometry remains owned by the WAL configuration and
+adapter.
 
-No frontier operation uses `seq_cst`.
+For every non-empty batch:
 
-## Memory
+```text
+append all records -> sync -> publish durable Frontier
+```
 
-- Storage contains exactly `capacity` fixed-stride blocks.
-- Every block address satisfies configured `alignment`.
-- The complete allocation is zeroed during `open()` to commit and touch every
-  page before role threads start.
-- No allocation occurs in publish, durability advance, consume, or position view.
+Append failure, sync failure, and physical sequence exhaustion set sticky
+terminal `failed_`. While Failed:
 
-## Failure
+- every `process()` returns `ModuleFailed`;
+- no append or sync occurs;
+- durable Frontier does not advance;
+- pending upstream work is irrelevant.
 
-- Empty durability batches do not append or synchronize.
-- A failed append or sync does not move `durable`.
-- Retained views remain independent of durability and do not grant downstream
-  permission.
-- A failed persistence module prevents further durable progress.
+Lifecycle misuse and broken tract invariants do not set `failed_`.
 
-`PersistenceModule` owns its terminal failure state; `RecordTape` remains
-unaware of it. A composition with mandatory persistence must stop its producer
-after observing that failure.
+## Lifecycle
 
-## Post-Crash Tail
+RecordTape lifecycle:
 
-- The maximal contiguous CRC-valid prefix is the authoritative recovered WAL.
-- Every complete record in that prefix participates in replay and rebuild.
-- Client acknowledgement state does not change the recovered tail.
-- Batches and the runtime `durable` frontier are not persisted as separate
-  commit metadata.
-- The physical format has no batch commit record or commit marker.
+```text
+Constructed -> Open -> Closed
+```
+
+- failed initial configuration/allocation leaves Constructed;
+- successful `open()` starts the only lifetime;
+- `open()` while Open returns `AlreadyOpen`;
+- `close()` is terminal and idempotent;
+- `open()` after Close terminates;
+- `open()` and `close()` are quiescent operations.
+
+Persistence processing and close likewise require quiescent roles. Persistence
+reopen is not part of the current contract.

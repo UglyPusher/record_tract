@@ -16,6 +16,7 @@
 #include <fstream>
 #include <vector>
 
+using namespace fexma::record_tract;
 using namespace fexma::wal;
 
 namespace {
@@ -54,10 +55,17 @@ payload(std::uint64_t value) noexcept {
 [[nodiscard]] bool create_wal(const std::filesystem::path& path,
                               std::uint32_t records) {
   std::filesystem::remove(path);
-  PersistenceModule persistence;
+  RecordTape tape;
+  Persistence persistence(tape, tape.GetFrontier(),
+                          PersistencePolicy{records == 0 ? 1u : records});
+  tape.SetTailRef(persistence.GetFrontier());
+  if (tape.open({config.payload_size, records == 0 ? 1u : records,
+                 config.alignment}) != RecordTapeOpenStatus::Ok) {
+    return false;
+  }
   const PhysicalWalConfig physical_config{
-      config.payload_size,           config.alignment,
-      config.payload_schema_version, config.stream_kind,
+      config.alignment,              config.payload_schema_version,
+      config.stream_kind,
       config.stream_id,              config.epoch_id,
       config.first_sequence,         config.manifest_id};
   if (!persistence.open(path, physical_config).ok()) {
@@ -65,12 +73,14 @@ payload(std::uint64_t value) noexcept {
   }
   for (std::uint32_t index = 0; index < records; ++index) {
     const auto bytes = payload(index + 1u);
-    const RecordView record{index, bytes};
-    if (!persistence.append(record)) {
+    if (!tape.try_publish(bytes).ok()) {
       return false;
     }
   }
-  return persistence.sync() && persistence.close();
+  const SliderStatus processed = persistence.process();
+  return (records == 0 ? processed == SliderStatus::Empty
+                       : processed == SliderStatus::Processed) &&
+         persistence.close();
 }
 
 [[nodiscard]] std::vector<std::byte>
