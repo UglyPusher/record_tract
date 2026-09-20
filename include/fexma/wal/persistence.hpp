@@ -48,7 +48,6 @@ public:
   [[nodiscard]] bool failed() const noexcept;
   [[nodiscard]] SliderResult process_until(Position available_end) noexcept;
   [[nodiscard]] const Frontier& GetFrontier() const noexcept;
-  void reset_quiescent(Position initial) noexcept;
 
 private:
   [[nodiscard]] bool append(const RecordView& record) noexcept;
@@ -95,9 +94,6 @@ public:
   }
   [[nodiscard]] Position current() const noexcept {
     return GetFrontier().load(std::memory_order_acquire);
-  }
-  void reset_quiescent(Position initial) noexcept {
-    core_.reset_quiescent(initial);
   }
 
 private:

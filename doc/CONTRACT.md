@@ -174,7 +174,6 @@ public:
   SliderResult process_available() noexcept;
   Position GetFrontier() const noexcept;
   Position current() const noexcept;
-  void reset_quiescent(Position initial) noexcept;
 };
 ```
 
@@ -426,8 +425,8 @@ independently of the lost runtime `durable` frontier.
 
 `RecordTape::open()` validates configuration, allocates and warms ring storage,
 and resets its intrinsic boundaries. Each generic Slider owns its processed
-frontier; `reset_quiescent()` initializes that boundary only while processing is
-stopped.
+frontier, which starts at its bootstrap state and advances only through normal
+processing publication.
 
 `Persistence::open()` creates and physically synchronizes a new WAL file.
 Creation is exclusive: an existing path returns `OpenStatus::FileAlreadyExists`

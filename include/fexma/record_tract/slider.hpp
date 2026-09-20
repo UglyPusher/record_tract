@@ -23,7 +23,6 @@ struct ExecutionPolicy final {
 enum class SliderStatus : std::uint8_t {
   Processed,
   Empty,
-  UpstreamRegression,
   ViewUnavailable,
   ModuleFailed
 };
@@ -56,9 +55,6 @@ public:
 
     const Position available_end =
         upstream_frontier_->load(std::memory_order_acquire);
-    if (available_end < current) {
-      return {SliderStatus::UpstreamRegression, current, 0};
-    }
     if (available_end == current) {
       return {SliderStatus::Empty, current, 0};
     }
@@ -97,10 +93,6 @@ public:
 
   [[nodiscard]] Position current() const noexcept {
     return frontier_.load(std::memory_order_acquire);
-  }
-  // Cold-path initialization: process_available() must not be active.
-  void reset_quiescent(Position initial) noexcept {
-    frontier_.store(initial, std::memory_order_relaxed);
   }
 
 private:
