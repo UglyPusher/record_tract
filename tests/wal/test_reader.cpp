@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <span>
 
 using namespace fexma::record_tract;
@@ -36,21 +37,22 @@ payload(std::uint64_t value) noexcept {
 }
 
 [[nodiscard]] bool create_wal(const std::filesystem::path& path,
-                              std::uint32_t records) {
+                              std::uint32_t records,
+                              const WalConfig& wal_config) {
   std::filesystem::remove(path);
   RecordTape tape;
   Persistence persistence(tape, tape.GetFrontier(),
                           PersistencePolicy{records == 0 ? 1u : records});
   tape.SetTailRef(persistence.GetFrontier());
-  if (tape.open({config.payload_size, records == 0 ? 1u : records,
-                 config.alignment}) != RecordTapeOpenStatus::Ok) {
+  if (tape.open({wal_config.payload_size, records == 0 ? 1u : records,
+                 wal_config.alignment}) != RecordTapeOpenStatus::Ok) {
     return false;
   }
   const PhysicalWalConfig physical_config{
-      config.alignment,              config.payload_schema_version,
-      config.stream_kind,
-      config.stream_id,              config.epoch_id,
-      config.first_sequence,         config.manifest_id};
+      wal_config.alignment,              wal_config.payload_schema_version,
+      wal_config.stream_kind,
+      wal_config.stream_id,              wal_config.epoch_id,
+      wal_config.first_sequence,         wal_config.manifest_id};
   if (!persistence.open(path, physical_config).ok()) {
     return false;
   }
@@ -64,6 +66,11 @@ payload(std::uint64_t value) noexcept {
   return (records == 0 ? processed == SliderStatus::Empty
                        : processed == SliderStatus::Processed) &&
          persistence.close();
+}
+
+[[nodiscard]] bool create_wal(const std::filesystem::path& path,
+                              std::uint32_t records) {
+  return create_wal(path, records, config);
 }
 
 void overwrite(const std::filesystem::path& path, std::uint64_t offset,
@@ -247,6 +254,51 @@ void overwrite(const std::filesystem::path& path, std::uint64_t offset,
          scan.error == WalReadError::NonZeroPadding;
 }
 
+[[nodiscard]] bool empty_wal_is_clean_end_of_log() {
+  const auto path = test_path("fexma_wal_reader_empty.wal");
+  if (!create_wal(path, 0)) {
+    return false;
+  }
+
+  WalReader reader;
+  std::array<std::byte, config.payload_size> output{};
+  const bool reader_valid = reader.open(path, config).ok() &&
+                            reader.read_next(output).status ==
+                                ReadStatus::EndOfLog &&
+                            reader.close();
+  const ScanResult scan = scan_wal(path, config);
+  std::filesystem::remove(path);
+  return reader_valid && scan.status == ScanStatus::Clean &&
+         scan.records == 0 && scan.last_sequence == 0 &&
+         scan.last_valid_offset == records_offset(config);
+}
+
+[[nodiscard]] bool maximum_last_sequence_is_a_valid_record() {
+  const auto path = test_path("fexma_wal_reader_max_sequence.wal");
+  WalConfig terminal = config;
+  terminal.first_sequence = std::numeric_limits<std::uint64_t>::max();
+  if (!create_wal(path, 1, terminal)) {
+    return false;
+  }
+
+  WalReader reader;
+  std::array<std::byte, config.payload_size> output{};
+  const ReaderOpenResult opened = reader.open(path, terminal);
+  const ReadResult first = reader.read_next(output);
+  const ReadResult end = reader.read_next(output);
+  const bool reader_valid = opened.ok() && first.status == ReadStatus::Record &&
+                            first.sequence == terminal.first_sequence &&
+                            end.status == ReadStatus::EndOfLog &&
+                            reader.close();
+  const ScanResult scan = scan_wal(path, terminal);
+  std::filesystem::remove(path);
+  return reader_valid && scan.status == ScanStatus::Clean &&
+         scan.records == 1 &&
+         scan.last_sequence == std::numeric_limits<std::uint64_t>::max() &&
+         scan.last_valid_offset ==
+             records_offset(terminal) + aligned_record_size(terminal);
+}
+
 } // namespace
 
 int main() {
@@ -259,5 +311,7 @@ int main() {
   if (!incomplete_payload_and_padding_are_classified()) return 7;
   if (!sequence_gap_is_rejected()) return 8;
   if (!non_zero_padding_is_rejected()) return 9;
+  if (!empty_wal_is_clean_end_of_log()) return 10;
+  if (!maximum_last_sequence_is_a_valid_record()) return 11;
   return 0;
 }
