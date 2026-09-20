@@ -107,6 +107,7 @@ private:
   std::uint32_t payload_size_{};
   std::uint32_t capacity_{};
   std::atomic<bool> open_{false};
+  bool opened_once_{false};
 };
 
 #if defined(_MSC_VER)

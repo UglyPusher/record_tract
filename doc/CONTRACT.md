@@ -17,6 +17,7 @@ public:
   RecordTapeOpenStatus open(const RecordTapeConfig& config) noexcept;
   PublishResult try_publish(std::span<const std::byte> payload) noexcept;
   AccessResult try_view(Position position) const noexcept;
+  void SetTailRef(const Frontier& terminal) noexcept;
   ReclaimStatus reclaim(Position end) noexcept;
   void close() noexcept;
 
@@ -39,6 +40,23 @@ boundaries. It performs no file operation and has no durable boundary or
 persistence failure state. `reclaim(end)` accepts only monotonic exclusive
 boundaries in `[tail, head]`; the composition is responsible for proving that
 all mandatory readers have finished below `end`.
+
+`SetTailRef()` is bootstrap-only topology wiring. It must be called before
+`open()` and the referenced terminal frontier must outlive the tape. Calling it
+after `open()` is a programmer/lifecycle error and terminates; the terminal
+frontier reference is immutable for the open runtime lifetime.
+
+`RecordTape` has a one-shot lifecycle:
+
+```text
+Constructed -> Open -> Closed
+```
+
+An invalid configuration or allocation failure leaves a never-opened Tape in
+`Constructed`, so a later valid `open()` is allowed. After the first successful
+`open()`, `close()` is terminal for that object. A repeated `open()` while open
+returns `RecordTapeOpenStatus::AlreadyOpen`; an `open()` after `close()` is a
+lifecycle violation and terminates. Repeated `close()` calls are idempotent.
 
 `RecordTapeConfig` contains only runtime storage fields: fixed payload size,
 capacity, and allocation alignment.
@@ -152,9 +170,10 @@ predecessor as the source of its permitted boundary. A root Persistence may use
 the same tape as both source and predecessor.
 
 `Persistence::open()` requires the source `RecordTape` to be already open and
-configured. The physical WAL payload size is derived from
-`RecordTape::payload_size()`; it is not supplied independently through
-`PhysicalWalConfig`.
+configured. Calling it while the source is closed is a bootstrap/programmer
+error and terminates; it is not reported as `OpenStatus::InvalidConfig`. The
+physical WAL payload size is derived from `RecordTape::payload_size()`; it is
+not supplied independently through `PhysicalWalConfig`.
 
 ```cpp
 struct PersistencePolicy final {
@@ -441,9 +460,11 @@ independently of the lost runtime `durable` frontier.
 ## Lifecycle
 
 `RecordTape::open()` validates configuration, allocates and warms ring storage,
-and resets its intrinsic boundaries. Each generic Slider owns its processed
-frontier, which starts at its bootstrap state and advances only through normal
-processing publication.
+and resets its intrinsic Head boundary. Terminal frontier wiring must already
+be complete before `open()`; `SetTailRef()` after `open()` terminates. The
+successful open is one-shot: the object cannot be reopened after `close()`.
+Each generic Slider owns its processed frontier, which starts at its bootstrap
+state and advances only through normal processing publication.
 
 `Persistence::open()` creates and physically synchronizes a new WAL file.
 Creation is exclusive: an existing path returns `OpenStatus::FileAlreadyExists`

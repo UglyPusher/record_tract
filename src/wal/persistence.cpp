@@ -26,7 +26,9 @@ detail::PersistenceCore::~PersistenceCore() { (void)close(); }
 OpenResult detail::PersistenceCore::open(
     const std::filesystem::path& path,
     const PhysicalWalConfig& config) noexcept {
-  assert(source_.is_open());
+  if (!source_.is_open()) [[unlikely]] {
+    std::terminate();
+  }
   if (is_open()) return {OpenStatus::AlreadyOpen};
   const WalConfig adapter_config{
       source_.payload_size(), 1, config.alignment, config.payload_schema_version,

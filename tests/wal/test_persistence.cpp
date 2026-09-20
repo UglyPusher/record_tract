@@ -136,12 +136,15 @@ constexpr PhysicalWalConfig physical_config{
 
   RecordTape tape;
   Persistence persistence(tape, tape.GetFrontier(), PersistencePolicy{2});
-  if (!open(tape, persistence, path)) return false;
-
   auto& persistence_slider = persistence;
   NoOpModule no_op;
   Slider no_op_slider(tape, persistence_slider.GetFrontier(), no_op);
   tape.SetTailRef(no_op_slider.GetFrontier());
+  if (tape.open({wal_config.payload_size, wal_config.capacity,
+                 wal_config.alignment}) != RecordTapeOpenStatus::Ok ||
+      !persistence.open(path, physical_config).ok()) {
+    return false;
+  }
   for (std::uint64_t value = 0; value < 5; ++value) {
     if (!publish(tape, value)) return false;
   }
@@ -333,12 +336,15 @@ constexpr PhysicalWalConfig physical_config{
 
   RecordTape tape;
   Persistence persistence(tape, tape.GetFrontier(), PersistencePolicy{2});
-  if (!open(tape, persistence, path)) return false;
-
   auto& persistence_slider = persistence;
   NoOpModule no_op;
   Slider no_op_slider(tape, persistence_slider.GetFrontier(), no_op);
   tape.SetTailRef(no_op_slider.GetFrontier());
+  if (tape.open({wal_config.payload_size, wal_config.capacity,
+                 wal_config.alignment}) != RecordTapeOpenStatus::Ok ||
+      !persistence.open(path, physical_config).ok()) {
+    return false;
+  }
   if (!publish(tape, 0)) return false;
 
   detail::PhysicalWalFileTestControl initial_control{};

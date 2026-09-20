@@ -43,6 +43,7 @@ using Payload = std::array<std::byte, 16>;
   std::filesystem::remove(unexpected_path);
   const bool no_file = !std::filesystem::exists(unexpected_path);
   tape.close();
+  tape.close();
   return no_file && !tape.is_open() &&
          tape.try_publish(payload(0)).status == PublishStatus::Closed &&
          tape.try_view(0).status == ViewStatus::Closed;

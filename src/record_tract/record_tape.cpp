@@ -6,6 +6,7 @@
 #include <fexma/record_tract/record_tape.hpp>
 
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <new>
 
@@ -98,12 +99,18 @@ RecordTape::RecordTape() noexcept : tail_frontier_(&head_boundary_.value) {}
 RecordTape::~RecordTape() { close(); }
 
 void RecordTape::SetTailRef(const Frontier& frontier) noexcept {
+  if (is_open()) [[unlikely]] {
+    std::terminate();
+  }
   tail_frontier_ = &frontier;
 }
 
 RecordTapeOpenStatus
 RecordTape::open(const RecordTapeConfig& config) noexcept {
   if (is_open()) return RecordTapeOpenStatus::AlreadyOpen;
+  if (opened_once_) [[unlikely]] {
+    std::terminate();
+  }
   if (!valid_runtime_config(config)) {
     return RecordTapeOpenStatus::InvalidConfig;
   }
@@ -114,6 +121,7 @@ RecordTape::open(const RecordTapeConfig& config) noexcept {
   payload_size_ = config.payload_size;
   capacity_ = config.capacity;
   head_boundary_.value.store(0, std::memory_order_relaxed);
+  opened_once_ = true;
   open_.store(true, std::memory_order_release);
   return RecordTapeOpenStatus::Ok;
 }

@@ -13,10 +13,12 @@ head - tail <= capacity
 - `[tail, head)` contains published retained positions.
 - `[head, tail + capacity)` is free capacity.
 - Only the producer writes `head`.
-- Only the composition/reclaimer writes `tail`.
-- `reclaim(end)` cannot move backward or beyond observed `head`.
-- The composition advances `tail` only after every mandatory reader has
-  finished the reclaimed positions.
+- `tail` is an acquire-observation of the terminal frontier selected during
+  bootstrap; no separate materialized tail state is published by RecordTape.
+- The terminal frontier reference is selected before `open()` and is immutable
+  for the open runtime lifetime.
+- A terminal stage publishes its frontier with release semantics only after all
+  mandatory work and borrowed views below that frontier are complete.
 
 `RecordTape` contains no `durable` frontier, file writer, or persistence failure
 state.
@@ -138,6 +140,15 @@ producer --RecordTape::GetFrontier()--> Slider
 - Producer acquires `tail` before reusing capacity.
 
 No frontier operation uses `seq_cst`.
+
+`SetTailRef()` is a bootstrap-only operation. Calling it after `open()` is a
+programmer/lifecycle error and terminates. The referenced frontier must outlive
+the RecordTape. `open()` and `close()` are quiescent lifecycle operations;
+they do not make concurrent buffer access safe. RecordTape lifecycle is
+one-shot: `Constructed -> Open -> Closed`; a successful lifetime cannot be
+reopened. Failed initial configuration or allocation leaves the object in
+`Constructed`, repeated `close()` is harmless, and `open()` after `Closed` is a
+programmer/lifecycle error that terminates.
 
 ## Persistence Composition Invariants
 
