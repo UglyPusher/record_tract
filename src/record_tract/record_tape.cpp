@@ -63,16 +63,14 @@ RecordTapeOpenStatus RecordTape::Buffer::initialize(
   }
 
   alignment_ = config.alignment;
-  size_ = size;
   data_ = static_cast<std::byte*>(
-      ::operator new(size_, std::align_val_t{alignment_}, std::nothrow));
+      ::operator new(size, std::align_val_t{alignment_}, std::nothrow));
   if (data_ == nullptr) {
-    size_ = 0;
     return RecordTapeOpenStatus::AllocationFailed;
   }
   stride_ = stride;
   payload_size_ = config.payload_size;
-  std::memset(data_, 0, size_);
+  std::memset(data_, 0, size);
   return RecordTapeOpenStatus::Ok;
 }
 
@@ -81,7 +79,6 @@ void RecordTape::Buffer::release() noexcept {
     ::operator delete(data_, std::align_val_t{alignment_});
   }
   data_ = nullptr;
-  size_ = 0;
   stride_ = 0;
   payload_size_ = 0;
 }
@@ -104,37 +101,38 @@ void RecordTape::SetTailRef(const Frontier& frontier) noexcept {
   tail_frontier_ = &frontier;
 }
 
-RecordTapeOpenResult
+RecordTapeOpenStatus
 RecordTape::open(const RecordTapeConfig& config) noexcept {
-  if (is_open()) return {RecordTapeOpenStatus::AlreadyOpen};
+  if (is_open()) return RecordTapeOpenStatus::AlreadyOpen;
   if (!valid_runtime_config(config)) {
-    return {RecordTapeOpenStatus::InvalidConfig};
+    return RecordTapeOpenStatus::InvalidConfig;
   }
 
   const RecordTapeOpenStatus buffer_status = buffer_.initialize(config);
-  if (buffer_status != RecordTapeOpenStatus::Ok) return {buffer_status};
+  if (buffer_status != RecordTapeOpenStatus::Ok) return buffer_status;
 
-  config_ = config;
+  payload_size_ = config.payload_size;
+  capacity_ = config.capacity;
   head_boundary_.value.store(0, std::memory_order_relaxed);
   open_.store(true, std::memory_order_release);
-  return {RecordTapeOpenStatus::Ok};
+  return RecordTapeOpenStatus::Ok;
 }
 
 PublishResult
 RecordTape::try_publish(std::span<const std::byte> payload) noexcept {
   if (!is_open()) return {PublishStatus::Closed, 0};
-  if (payload.size() != config_.payload_size) {
+  if (payload.size() != payload_size_) {
     return {PublishStatus::InvalidPayloadSize, 0};
   }
   const Position head = head_boundary_.value.load(std::memory_order_relaxed);
   const Position tail =
       tail_frontier_->load(std::memory_order_acquire);
-  if (head - tail == config_.capacity) return {PublishStatus::Full, 0};
+  if (head - tail == capacity_) return {PublishStatus::Full, 0};
   if (head == std::numeric_limits<Position>::max()) {
     return {PublishStatus::PositionExhausted, 0};
   }
 
-  const auto slot = static_cast<std::uint32_t>(head % config_.capacity);
+  const auto slot = static_cast<std::uint32_t>(head % capacity_);
   std::span<std::byte> block = buffer_.block_at_slot(slot);
   std::memcpy(block.data(), payload.data(), payload.size());
   head_boundary_.value.store(head + 1u, std::memory_order_release);
@@ -150,7 +148,7 @@ AccessResult RecordTape::try_view(Position position) const noexcept {
   const Position head = head_boundary_.value.load(std::memory_order_acquire);
   if (position >= head) return {ViewStatus::Unpublished};
 
-  const auto slot = static_cast<std::uint32_t>(position % config_.capacity);
+  const auto slot = static_cast<std::uint32_t>(position % capacity_);
   return {ViewStatus::Ok, {position, buffer_.block_at_slot(slot)}};
 }
 

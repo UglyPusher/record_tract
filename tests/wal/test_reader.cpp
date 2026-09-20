@@ -41,9 +41,8 @@ payload(std::uint64_t value) noexcept {
   Persistence persistence(tape, tape.GetFrontier(),
                           PersistencePolicy{records == 0 ? 1u : records});
   tape.SetTailRef(persistence.GetFrontier());
-  if (!tape.open({config.payload_size, records == 0 ? 1u : records,
-                  config.alignment})
-           .ok()) {
+  if (tape.open({config.payload_size, records == 0 ? 1u : records,
+                 config.alignment}) != RecordTapeOpenStatus::Ok) {
     return false;
   }
   const PhysicalWalConfig physical_config{
@@ -60,9 +59,9 @@ payload(std::uint64_t value) noexcept {
       return false;
     }
   }
-  const SliderResult processed = persistence.process();
-  return (records == 0 ? processed.status == SliderStatus::Empty
-                       : processed.status == SliderStatus::Processed) &&
+  const SliderStatus processed = persistence.process();
+  return (records == 0 ? processed == SliderStatus::Empty
+                       : processed == SliderStatus::Processed) &&
          persistence.close();
 }
 

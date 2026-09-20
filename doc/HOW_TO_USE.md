@@ -38,7 +38,8 @@ starting runtime threads:
 
 ```cpp
 core::RecordTape tape;
-if (!tape.open({payload_size, capacity, core::default_alignment}).ok()) {
+if (tape.open({payload_size, capacity, core::default_alignment}) !=
+    core::RecordTapeOpenStatus::Ok) {
   return 1;
 }
 ```
@@ -77,10 +78,10 @@ The Slider stores references to the tape, predecessor, and module. Each of
 those objects must outlive the Slider. Only one runtime executor may mutate a
 given Slider by calling `process()`.
 
-`process()` is synchronous. `SliderResult::ok()` is true for both
-`SliderStatus::Processed` and `SliderStatus::Empty`; `Empty` means that the
-predecessor frontier had no new records at the observation point. Other Slider
-statuses are failures for this minimal example.
+`process()` is synchronous and returns `SliderStatus`. `Processed` means the
+stage advanced its own frontier; `Empty` means that the upstream frontier had
+no new records at the observation point. Other Slider statuses are failures
+for this minimal example.
 
 ## Frontiers and reclaim
 

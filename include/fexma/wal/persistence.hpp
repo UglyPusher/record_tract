@@ -46,7 +46,7 @@ public:
   [[nodiscard]] bool close() noexcept;
   [[nodiscard]] bool is_open() const noexcept;
   [[nodiscard]] bool failed() const noexcept;
-  [[nodiscard]] SliderResult process_until(Position available_end) noexcept;
+  [[nodiscard]] SliderStatus process_until(Position available_end) noexcept;
   [[nodiscard]] const Frontier& GetFrontier() const noexcept;
 
 private:
@@ -84,7 +84,7 @@ public:
   [[nodiscard]] bool is_open() const noexcept { return core_.is_open(); }
   [[nodiscard]] bool failed() const noexcept { return core_.failed(); }
 
-  [[nodiscard]] SliderResult process() noexcept {
+  [[nodiscard]] SliderStatus process() noexcept {
     const Position available_end =
         upstream_frontier_->load(std::memory_order_acquire);
     return core_.process_until(available_end);

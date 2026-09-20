@@ -14,7 +14,7 @@ below.
 ```cpp
 class RecordTape {
 public:
-  RecordTapeOpenResult open(const RecordTapeConfig& config) noexcept;
+  RecordTapeOpenStatus open(const RecordTapeConfig& config) noexcept;
   PublishResult try_publish(std::span<const std::byte> payload) noexcept;
   AccessResult try_view(Position position) const noexcept;
   ReclaimStatus reclaim(Position end) noexcept;
@@ -55,8 +55,8 @@ NoOpModule second_module;
 Slider first(tape, first_module);
 Slider second(tape, first, second_module);
 
-SliderResult first_result = first.process();
-SliderResult second_result = second.process();
+SliderStatus first_status = first.process();
+SliderStatus second_status = second.process();
 Position visible_downstream = second.GetFrontier();
 ```
 
@@ -171,7 +171,7 @@ public:
   bool is_open() const noexcept;
   bool failed() const noexcept;
 
-  SliderResult process() noexcept;
+  SliderStatus process() noexcept;
   Position GetFrontier() const noexcept;
   Position current() const noexcept;
 };

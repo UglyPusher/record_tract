@@ -27,17 +27,6 @@ enum class SliderStatus : std::uint8_t {
   ModuleFailed
 };
 
-struct SliderResult {
-  SliderStatus status{SliderStatus::Empty};
-  Position current{};
-  std::uint64_t processed_count{};
-  ViewStatus view_status{ViewStatus::Ok};
-
-  [[nodiscard]] bool ok() const noexcept {
-    return status == SliderStatus::Processed || status == SliderStatus::Empty;
-  }
-};
-
 template <class Module>
 class Slider final {
 public:
@@ -50,16 +39,15 @@ public:
       : source_(source), upstream_frontier_(&upstream_frontier), module_(module),
         policy_(normalize(policy)) {}
 
-  [[nodiscard]] SliderResult process() noexcept {
+  [[nodiscard]] SliderStatus process() noexcept {
     Position current = frontier_.load(std::memory_order_acquire);
 
     const Position available_end =
         upstream_frontier_->load(std::memory_order_acquire);
     if (available_end == current) {
-      return {SliderStatus::Empty, current, 0};
+      return SliderStatus::Empty;
     }
 
-    std::uint64_t processed_count = 0;
     std::size_t since_publish = 0;
     while (current < available_end) {
       const Position pass_end =
@@ -68,16 +56,14 @@ public:
         const AccessResult access = source_.try_view(current);
         if (!access.ok()) {
           flush(current, since_publish);
-          return {SliderStatus::ViewUnavailable, current, processed_count,
-                  access.status};
+          return SliderStatus::ViewUnavailable;
         }
         if (!module_.process(access.record)) {
           flush(current, since_publish);
-          return {SliderStatus::ModuleFailed, current, processed_count};
+          return SliderStatus::ModuleFailed;
         }
 
         ++current;
-        ++processed_count;
         ++since_publish;
         if (since_publish == policy_.publish_count) {
           publish(current);
@@ -86,7 +72,7 @@ public:
       }
     }
     if (since_publish != 0) publish(current);
-    return {SliderStatus::Processed, current, processed_count};
+    return SliderStatus::Processed;
   }
 
   [[nodiscard]] const Frontier& GetFrontier() const noexcept { return frontier_; }

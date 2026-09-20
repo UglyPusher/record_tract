@@ -77,11 +77,11 @@ bool detail::PersistenceCore::failed() const noexcept {
   return failed_.load(std::memory_order_acquire);
 }
 
-SliderResult detail::PersistenceCore::process_until(Position available_end) noexcept {
+SliderStatus detail::PersistenceCore::process_until(Position available_end) noexcept {
   Position current =
       GetFrontier().load(std::memory_order_acquire);
   if (available_end == current) {
-    return {SliderStatus::Empty, current, 0};
+    return SliderStatus::Empty;
   }
 
   const Position available_count = available_end - current;
@@ -89,25 +89,22 @@ SliderResult detail::PersistenceCore::process_until(Position available_end) noex
                              ? available_count
                              : policy_.sync_count;
   const Position batch_end = current + count;
-  std::uint64_t processed_count = 0;
   while (current < batch_end) {
     const AccessResult access = source_.try_view(current);
     if (!access.ok()) {
-      return {SliderStatus::ViewUnavailable, current, processed_count,
-              access.status};
+      return SliderStatus::ViewUnavailable;
     }
     if (!append(access.record)) {
-      return {SliderStatus::ModuleFailed, current, processed_count};
+      return SliderStatus::ModuleFailed;
     }
     ++current;
-    ++processed_count;
   }
 
   if (!sync()) {
-    return {SliderStatus::ModuleFailed, current, processed_count};
+    return SliderStatus::ModuleFailed;
   }
   publish(current);
-  return {SliderStatus::Processed, current, processed_count};
+  return SliderStatus::Processed;
 }
 
 const Frontier& detail::PersistenceCore::GetFrontier() const noexcept {

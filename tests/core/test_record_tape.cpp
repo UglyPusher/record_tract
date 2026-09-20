@@ -29,13 +29,11 @@ using Payload = std::array<std::byte, 16>;
 
 [[nodiscard]] bool opens_without_physical_storage() {
   RecordTape tape;
-  if (tape.open({}).status != RecordTapeOpenStatus::InvalidConfig ||
-      tape.open({16, 0, 64}).status !=
-          RecordTapeOpenStatus::InvalidConfig ||
-      tape.open({16, 4, 24}).status !=
-          RecordTapeOpenStatus::InvalidConfig ||
-      !tape.open({16, 4, 64}).ok() ||
-      tape.open({16, 4, 64}).status != RecordTapeOpenStatus::AlreadyOpen) {
+  if (tape.open({}) != RecordTapeOpenStatus::InvalidConfig ||
+      tape.open({16, 0, 64}) != RecordTapeOpenStatus::InvalidConfig ||
+      tape.open({16, 4, 24}) != RecordTapeOpenStatus::InvalidConfig ||
+      tape.open({16, 4, 64}) != RecordTapeOpenStatus::Ok ||
+      tape.open({16, 4, 64}) != RecordTapeOpenStatus::AlreadyOpen) {
     return false;
   }
 
@@ -52,7 +50,8 @@ using Payload = std::array<std::byte, 16>;
 
 [[nodiscard]] bool defaults_to_head_as_terminal_frontier() {
   RecordTape tape;
-  if (!tape.open({16, 1, 64}).ok() || !tape.try_publish(payload(0)).ok() ||
+  if (tape.open({16, 1, 64}) != RecordTapeOpenStatus::Ok ||
+      !tape.try_publish(payload(0)).ok() ||
       tape.tail() != tape.head() ||
       tape.try_view(0).status != ViewStatus::Reclaimed ||
       !tape.try_publish(payload(1)).ok()) {
@@ -66,7 +65,7 @@ using Payload = std::array<std::byte, 16>;
   Frontier terminal{};
   RecordTape tape;
   tape.SetTailRef(terminal);
-  if (!tape.open({16, 3, 64}).ok()) return false;
+  if (tape.open({16, 3, 64}) != RecordTapeOpenStatus::Ok) return false;
 
   for (Position position = 0; position < 3; ++position) {
     const PublishResult published = tape.try_publish(payload(position));
@@ -105,7 +104,7 @@ using Payload = std::array<std::byte, 16>;
   Frontier terminal{};
   RecordTape tape;
   tape.SetTailRef(terminal);
-  if (!tape.open({16, 128, 64}).ok()) return false;
+  if (tape.open({16, 128, 64}) != RecordTapeOpenStatus::Ok) return false;
   std::atomic<bool> failed{false};
 
   std::thread producer([&] {

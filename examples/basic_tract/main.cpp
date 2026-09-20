@@ -45,7 +45,8 @@ int main() {
   Module module;
   core::Slider slider(tape, tape.GetFrontier(), module);
   tape.SetTailRef(slider.GetFrontier());
-  if (!tape.open({payload_size, capacity, core::default_alignment}).ok()) {
+  if (tape.open({payload_size, capacity, core::default_alignment}) !=
+      core::RecordTapeOpenStatus::Ok) {
     return 1;
   }
 
@@ -81,8 +82,9 @@ int main() {
     for (;;) {
       if (failed.load(std::memory_order_acquire)) return;
 
-      const core::SliderResult result = slider.process();
-      if (!result.ok()) {
+      const core::SliderStatus result = slider.process();
+      if (result != core::SliderStatus::Processed &&
+          result != core::SliderStatus::Empty) {
         failed.store(true, std::memory_order_release);
         return;
       }
@@ -92,7 +94,7 @@ int main() {
         return;
       }
 
-      if (result.status == core::SliderStatus::Empty) {
+      if (result == core::SliderStatus::Empty) {
         std::this_thread::yield();
       }
     }

@@ -27,14 +27,6 @@ enum class RecordTapeOpenStatus : std::uint8_t {
   AlreadyOpen
 };
 
-struct RecordTapeOpenResult {
-  RecordTapeOpenStatus status{RecordTapeOpenStatus::InvalidConfig};
-
-  [[nodiscard]] bool ok() const noexcept {
-    return status == RecordTapeOpenStatus::Ok;
-  }
-};
-
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4324) // Intentional cache-line boundary isolation.
@@ -50,7 +42,7 @@ public:
   RecordTape(RecordTape&&) = delete;
   RecordTape& operator=(RecordTape&&) = delete;
 
-  [[nodiscard]] RecordTapeOpenResult
+  [[nodiscard]] RecordTapeOpenStatus
   open(const RecordTapeConfig& config) noexcept;
   [[nodiscard]] PublishResult
   try_publish(std::span<const std::byte> payload) noexcept;
@@ -99,7 +91,6 @@ private:
 
   private:
     std::byte* data_{};
-    std::size_t size_{};
     std::size_t stride_{};
     std::uint32_t payload_size_{};
     std::uint32_t alignment_{default_alignment};
@@ -110,7 +101,8 @@ private:
   TapeBoundary head_boundary_{};
   const Frontier* tail_frontier_;
   Buffer buffer_{};
-  RecordTapeConfig config_{};
+  std::uint32_t payload_size_{};
+  std::uint32_t capacity_{};
   std::atomic<bool> open_{false};
 };
 
