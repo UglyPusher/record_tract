@@ -23,6 +23,9 @@ constexpr core::Position record_count = 4096;
 
 using Payload = std::array<std::byte, payload_size>;
 
+constexpr std::uint64_t hash_seed = 0x6a09e667f3bcc909ull;
+constexpr std::uint64_t hash_prime = 0x100000001b3ull;
+
 void store_u64(std::span<std::byte> bytes, std::size_t offset,
                std::uint64_t value) noexcept {
   for (std::size_t index = 0; index < sizeof(value); ++index) {
@@ -47,6 +50,16 @@ void store_u64(std::span<std::byte> bytes, std::size_t offset,
   store_u64(bytes, 0, position);
   store_u64(bytes, sizeof(position), position * 3u + 0x5a5a5a5au);
   return bytes;
+}
+
+[[nodiscard]] std::uint64_t hash_payload(
+    std::uint64_t state, std::span<const std::byte> payload) noexcept {
+  for (const std::byte byte : payload) {
+    state ^= static_cast<std::uint64_t>(std::to_integer<unsigned char>(byte));
+    state *= hash_prime;
+    state ^= state >> 29u;
+  }
+  return state;
 }
 
 class ValidatingModule final {
@@ -74,6 +87,25 @@ private:
   core::Position processed_count_{};
 };
 
+class RollingHashModule final {
+public:
+  [[nodiscard]] bool process(const core::RecordView& record) noexcept {
+    hash_ = hash_payload(hash_, record.payload);
+    ++processed_count_;
+    return true;
+  }
+
+  [[nodiscard]] core::Position processed() const noexcept {
+    return processed_count_;
+  }
+
+  [[nodiscard]] std::uint64_t value() const noexcept { return hash_; }
+
+private:
+  std::uint64_t hash_{hash_seed};
+  core::Position processed_count_{};
+};
+
 } // namespace
 
 int main() {
@@ -81,10 +113,16 @@ int main() {
 
   core::RecordTape tape;
   ValidatingModule module_a;
-  ValidatingModule module_b;
+  RollingHashModule hash_module;
+
+  std::uint64_t expected_hash = hash_seed;
+  for (core::Position position = 0; position < record_count; ++position) {
+    const Payload bytes = make_payload(position);
+    expected_hash = hash_payload(expected_hash, bytes);
+  }
 
   core::Slider slider_a(tape, tape.GetFrontier(), module_a, policy);
-  core::Slider slider_b(tape, slider_a.GetFrontier(), module_b, policy);
+  core::Slider slider_b(tape, slider_a.GetFrontier(), hash_module, policy);
   tape.SetTailRef(slider_b.GetFrontier());
 
   if (tape.open({payload_size, capacity, core::default_alignment}) !=
@@ -154,7 +192,8 @@ int main() {
       !failed.load(std::memory_order_acquire) &&
       producer_done.load(std::memory_order_acquire) &&
       module_a.processed() == record_count &&
-      module_b.processed() == record_count &&
+      hash_module.processed() == record_count &&
+      hash_module.value() == expected_hash &&
       slider_a.current() == record_count &&
       slider_b.current() == record_count && tape.head() == record_count &&
       tape.tail() == record_count;
