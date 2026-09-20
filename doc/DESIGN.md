@@ -39,8 +39,9 @@ later need bounded materialization, without specifying such a path now.
 `ExecutionPolicy::publish_count` controls release-publication cadence for the
 Slider-owned frontier. Complete publication batches are published during the
 call; final successful residual progress and a successful residual prefix before
-failure are flushed before return. A zero in either policy field invalidates the
-value object and normalizes the whole policy to `{1, 1}`.
+failure are flushed before return. Both policy fields must be greater than zero;
+debug builds assert this bootstrap precondition rather than normalizing the
+policy.
 
 A module owns processing semantics. The generic slider requires only synchronous
 `process(const RecordView&)` success or failure; it does not know what the
@@ -155,8 +156,9 @@ again; it never repairs, skips, or resynchronizes around corruption.
 
 The composition sets the persistence stage's `sync_count` and invokes
 `process()`. The stage reads its permitted boundary from
-`predecessor.GetFrontier()`; a zero `sync_count` is normalized to the default
-count of one. It obtains each selected `RecordView` from its separately supplied
+`predecessor.GetFrontier()`; `sync_count` must be greater than zero, and debug
+builds assert this bootstrap precondition rather than normalizing it. It obtains
+each selected `RecordView` from its separately supplied
 `RecordTape`, appends the batch, requests one sync, and publishes the range end
 as `durable` only after success. Physical WAL sequence derives from the stored
 `first_sequence` and the tape position.

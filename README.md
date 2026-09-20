@@ -72,8 +72,9 @@ externally observable successful behavior. They are retained for read mechanics
 that may later require bounded materialization. `publish_count` is the number of
 successfully processed records between frontier publications. Final successful
 progress and a successful prefix before failure are flushed before return. If
-either policy field is zero, the entire policy is normalized to the canonical
-`ExecutionPolicy{}` value `{1, 1}`.
+Both policy fields are bootstrap preconditions and must be greater than zero.
+Passing zero is a programmer error; the Slider asserts this precondition in
+debug builds and does not normalize the policy.
 
 The root and downstream construction forms are:
 
@@ -132,7 +133,9 @@ whose required durability operation has succeeded.
 
 The default `PersistencePolicy::sync_count` is one. It is the maximum number of
 records appended and synchronized as one durability batch by a single
-`process()` call; zero is normalized to the default of one.
+`process()` call. `sync_count` must be greater than zero; passing zero is a
+bootstrap programmer error and is asserted in debug builds rather than
+normalized.
 
 One persistence composition can therefore be wired as:
 

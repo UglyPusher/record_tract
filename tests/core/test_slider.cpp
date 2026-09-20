@@ -225,37 +225,6 @@ bool execution_policy_flushes_residual_before_failure() {
          read_frontier(slider.GetFrontier()) == 5 && module.count() == 5;
 }
 
-bool policy_observes_canonical_publication(ExecutionPolicy policy) {
-  RecordTape tape;
-  FrontierObservingModule module;
-  Slider slider(tape, tape.GetFrontier(), module, policy);
-  tape.SetTailRef(slider.GetFrontier());
-  if (!open_tape(tape) || !publish(tape, 1) || !publish(tape, 2) ||
-      !publish(tape, 3)) {
-    return false;
-  }
-
-  module.observe(slider);
-  const SliderStatus result = slider.process();
-  constexpr std::array<Position, 3> expected_frontiers{0, 1, 2};
-  if (result != SliderStatus::Processed ||
-      read_frontier(slider.GetFrontier()) != 3 || module.count() != 3) {
-    return false;
-  }
-  for (std::size_t index = 0; index < expected_frontiers.size(); ++index) {
-    if (module.position(index) != index ||
-        module.observed_frontier(index) != expected_frontiers[index]) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool execution_policy_invalid_values_normalize_to_canonical_default() {
-  return policy_observes_canonical_publication(ExecutionPolicy{0, 4}) &&
-         policy_observes_canonical_publication(ExecutionPolicy{4, 0}) &&
-         policy_observes_canonical_publication(ExecutionPolicy{0, 0});
-}
 } // namespace
 
 int main() {
@@ -267,7 +236,5 @@ int main() {
   if (!execution_policy_read_count_does_not_limit_one_call()) return 6;
   if (!execution_policy_publishes_cadence_and_partial_progress()) return 7;
   if (!execution_policy_flushes_residual_before_failure()) return 8;
-  if (!execution_policy_invalid_values_normalize_to_canonical_default())
-    return 9;
   return 0;
 }

@@ -8,6 +8,7 @@
 
 #include "physical_wal_adapter.hpp"
 
+#include <cassert>
 #include <limits>
 #include <new>
 
@@ -15,7 +16,9 @@ namespace fexma::wal {
 
 detail::PersistenceCore::PersistenceCore(const RecordTape& source,
                                          PersistencePolicy policy) noexcept
-    : source_(source), policy_(policy.sync_count == 0 ? PersistencePolicy{} : policy) {}
+    : source_(source), policy_(policy) {
+  assert(policy_.sync_count > 0);
+}
 
 detail::PersistenceCore::~PersistenceCore() { (void)close(); }
 

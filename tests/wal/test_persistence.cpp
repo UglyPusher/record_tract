@@ -372,9 +372,6 @@ int main() {
   if (!strict_default_policy_processes_one(PersistencePolicy{},
                                            "fexma_wal_persistence_default.wal"))
     return 1;
-  if (!strict_default_policy_processes_one(
-          PersistencePolicy{0}, "fexma_wal_persistence_zero.wal"))
-    return 2;
   if (!sync_policy_eight_drains_twenty_three()) return 3;
   if (!obeys_supplied_upstream_frontier()) return 4;
   if (!batches_sync_then_release_downstream()) return 5;

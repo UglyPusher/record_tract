@@ -62,8 +62,9 @@ Execution policy preserves these traversal and publication invariants:
 - a final successful residual prefix is published before return;
 - a successful residual prefix before module or view failure is published, but
   the failed or unavailable position is not;
-- if either count is zero, the complete policy is normalized to the canonical
-  `{1, 1}` policy.
+- `read_count` and `publish_count` are bootstrap preconditions and must both be
+  greater than zero; passing zero is a programmer error and is asserted in
+  debug builds rather than normalized.
 
 For the bare linear composition:
 

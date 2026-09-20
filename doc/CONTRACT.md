@@ -105,14 +105,12 @@ A residual successful prefix is published before successful return and before
 an existing module/view failure return. The failed or unavailable position is
 never included.
 
-ExecutionPolicy is normalized as one value object. If either count is zero, the
-entire policy becomes the canonical `ExecutionPolicy{}` value `{1, 1}`:
+Both `ExecutionPolicy` fields are bootstrap preconditions and must be greater
+than zero. Passing zero is a programmer error; debug builds assert this
+precondition and the supplied policy is preserved without normalization:
 
 ```text
 {8, 4} -> {8, 4}
-{0, 4} -> {1, 1}
-{8, 0} -> {1, 1}
-{0, 0} -> {1, 1}
 ```
 
 The slider owns no thread, scheduling loop, wait/spin/yield behavior, runtime
@@ -395,9 +393,9 @@ operationally tested condition.
 
 `Persistence<Predecessor>::process()` reads its permitted boundary
 from `predecessor.GetFrontier()` and selects at most its configured
-`sync_count` from `[durable, permitted boundary)`. A configured `sync_count` of
-zero is normalized to the default count of one. An empty selection performs no
-physical sync.
+`sync_count` from `[durable, permitted boundary)`. `sync_count` must be greater
+than zero; passing zero is a programmer error asserted during bootstrap rather
+than normalized. An empty selection performs no physical sync.
 
 For a non-empty batch the physical writer:
 

@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 
@@ -37,7 +38,10 @@ public:
   Slider(const RecordTape& source, const Frontier& upstream_frontier,
          Module& module, ExecutionPolicy policy) noexcept
       : source_(source), upstream_frontier_(&upstream_frontier), module_(module),
-        policy_(normalize(policy)) {}
+        policy_(policy) {
+    assert(policy_.read_count > 0);
+    assert(policy_.publish_count > 0);
+  }
 
   [[nodiscard]] SliderStatus process() noexcept {
     Position current = frontier_.load(std::memory_order_acquire);
@@ -82,13 +86,6 @@ public:
   }
 
 private:
-  [[nodiscard]] static constexpr ExecutionPolicy
-  normalize(ExecutionPolicy policy) noexcept {
-    return policy.read_count == 0 || policy.publish_count == 0
-               ? ExecutionPolicy{}
-               : policy;
-  }
-
   void flush(Position current, std::size_t since_publish) noexcept {
     if (since_publish != 0) publish(current);
   }
