@@ -16,6 +16,7 @@
 #include <fstream>
 #include <vector>
 
+using namespace fexma::record_tract;
 using namespace fexma::wal;
 
 namespace {

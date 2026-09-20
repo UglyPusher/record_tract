@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <span>
 
-namespace fexma::wal {
+namespace fexma::record_tract {
 
 struct RecordTapeConfig {
   std::uint32_t payload_size{};
@@ -114,4 +114,4 @@ private:
 #pragma warning(pop)
 #endif
 
-} // namespace fexma::wal
+} // namespace fexma::record_tract

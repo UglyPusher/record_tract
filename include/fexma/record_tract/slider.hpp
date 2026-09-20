@@ -15,7 +15,7 @@
 #include <cstdint>
 #include <exception>
 
-namespace fexma::wal {
+namespace fexma::record_tract {
 
 struct ExecutionPolicy final {
   std::size_t read_count{1};
@@ -105,4 +105,4 @@ private:
   alignas(64) Frontier frontier_{};
 };
 
-} // namespace fexma::wal
+} // namespace fexma::record_tract

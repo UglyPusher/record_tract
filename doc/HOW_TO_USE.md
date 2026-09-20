@@ -16,7 +16,7 @@ The complete compiling example is
 #include <fexma/record_tract/record_tape.hpp>
 #include <fexma/record_tract/slider.hpp>
 
-namespace core = fexma::wal;
+namespace core = fexma::record_tract;
 
 core::RecordTape tape;
 Module module;

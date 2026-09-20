@@ -10,7 +10,7 @@
 #include <limits>
 #include <new>
 
-namespace fexma::wal {
+namespace fexma::record_tract {
 namespace {
 
 [[nodiscard]] bool checked_add(std::size_t left, std::size_t right,
@@ -135,7 +135,14 @@ RecordTape::try_publish(std::span<const std::byte> payload) noexcept {
   const Position head = head_boundary_.value.load(std::memory_order_relaxed);
   const Position tail =
       tail_frontier_->load(std::memory_order_acquire);
-  if (head - tail == capacity_) return {PublishStatus::Full, 0};
+  if (tail > head) [[unlikely]] {
+    std::terminate();
+  }
+  const Position distance = head - tail;
+  if (distance > capacity_) [[unlikely]] {
+    std::terminate();
+  }
+  if (distance == capacity_) return {PublishStatus::Full, 0};
   if (head == std::numeric_limits<Position>::max()) {
     return {PublishStatus::PositionExhausted, 0};
   }
@@ -177,4 +184,4 @@ Position RecordTape::tail() const noexcept {
   return tail_frontier_->load(std::memory_order_acquire);
 }
 
-} // namespace fexma::wal
+} // namespace fexma::record_tract

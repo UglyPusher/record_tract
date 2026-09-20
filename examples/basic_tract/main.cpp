@@ -13,7 +13,7 @@
 #include <span>
 #include <thread>
 
-namespace core = fexma::wal;
+namespace core = fexma::record_tract;
 
 namespace {
 

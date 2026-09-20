@@ -10,7 +10,7 @@
 #include <atomic>
 #include <span>
 
-namespace fexma::wal {
+namespace fexma::record_tract {
 
 // RecordTape storage alignment. Physical WAL alignment is independent and is
 // declared with the physical WAL configuration types.
@@ -55,4 +55,4 @@ struct PublishResult {
   }
 };
 
-} // namespace fexma::wal
+} // namespace fexma::record_tract

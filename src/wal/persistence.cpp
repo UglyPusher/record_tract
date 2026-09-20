@@ -15,6 +15,13 @@
 
 namespace fexma::wal {
 
+using fexma::record_tract::AccessResult;
+using fexma::record_tract::Frontier;
+using fexma::record_tract::Position;
+using fexma::record_tract::RecordTape;
+using fexma::record_tract::RecordView;
+using fexma::record_tract::SliderStatus;
+
 detail::PersistenceCore::PersistenceCore(const RecordTape& source,
                                          PersistencePolicy policy) noexcept
     : source_(source), policy_(policy) {

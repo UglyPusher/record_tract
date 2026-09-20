@@ -13,7 +13,7 @@
 #include <span>
 #include <thread>
 
-using namespace fexma::wal;
+using namespace fexma::record_tract;
 
 namespace {
 

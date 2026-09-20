@@ -34,7 +34,7 @@ violation and terminates.
 ## RecordTape
 
 ```cpp
-namespace core = fexma::wal;
+namespace core = fexma::record_tract;
 
 core::RecordTape tape;
 core::Frontier terminal{};
@@ -96,10 +96,12 @@ RecordTape / upstream Frontier -> Persistence -> PhysicalWalAdapter
 ```
 
 ```cpp
-core::Persistence persistence{tape, tape.GetFrontier(), policy};
+namespace wal = fexma::wal;
+
+wal::Persistence persistence{tape, tape.GetFrontier(), policy};
 tape.SetTailRef(persistence.GetFrontier()); // before tape.open()
 
-persistence.open(path, physical_wal_config);
+if (!persistence.open(path, physical_wal_config).ok()) return 1;
 core::Slider downstream{tape, persistence.GetFrontier(), module};
 ```
 

@@ -34,7 +34,8 @@ namespace detail {
 class PhysicalWalAdapter;
 class PersistenceCore final {
 public:
-  PersistenceCore(const RecordTape& source, PersistencePolicy policy) noexcept;
+  PersistenceCore(const fexma::record_tract::RecordTape& source,
+                  PersistencePolicy policy) noexcept;
   ~PersistenceCore();
 
   PersistenceCore(const PersistenceCore&) = delete;
@@ -45,26 +46,29 @@ public:
   [[nodiscard]] bool close() noexcept;
   [[nodiscard]] bool is_open() const noexcept;
   [[nodiscard]] bool failed() const noexcept;
-  [[nodiscard]] SliderStatus process_until(Position available_end) noexcept;
-  [[nodiscard]] const Frontier& GetFrontier() const noexcept;
+  [[nodiscard]] fexma::record_tract::SliderStatus
+  process_until(fexma::record_tract::Position available_end) noexcept;
+  [[nodiscard]] const fexma::record_tract::Frontier& GetFrontier() const noexcept;
 
 private:
-  [[nodiscard]] bool append(const RecordView& record) noexcept;
+  [[nodiscard]] bool append(
+      const fexma::record_tract::RecordView& record) noexcept;
   [[nodiscard]] bool sync() noexcept;
-  void publish(Position end) noexcept;
+  void publish(fexma::record_tract::Position end) noexcept;
 
-  const RecordTape& source_;
+  const fexma::record_tract::RecordTape& source_;
   std::unique_ptr<PhysicalWalAdapter> physical_wal_{};
   std::uint64_t first_sequence_{};
   std::atomic<bool> failed_{false};
   const PersistencePolicy policy_;
-  alignas(64) Frontier frontier_{};
+  alignas(64) fexma::record_tract::Frontier frontier_{};
 };
 } // namespace detail
 
 class Persistence final {
 public:
-  Persistence(const RecordTape& source, const Frontier& upstream_frontier,
+  Persistence(const fexma::record_tract::RecordTape& source,
+              const fexma::record_tract::Frontier& upstream_frontier,
               PersistencePolicy policy = {}) noexcept
       : upstream_frontier_(&upstream_frontier), core_(source, policy) {}
 
@@ -83,20 +87,20 @@ public:
   [[nodiscard]] bool is_open() const noexcept { return core_.is_open(); }
   [[nodiscard]] bool failed() const noexcept { return core_.failed(); }
 
-  [[nodiscard]] SliderStatus process() noexcept {
-    const Position available_end =
+  [[nodiscard]] fexma::record_tract::SliderStatus process() noexcept {
+    const fexma::record_tract::Position available_end =
         upstream_frontier_->load(std::memory_order_acquire);
     return core_.process_until(available_end);
   }
-  [[nodiscard]] const Frontier& GetFrontier() const noexcept {
+  [[nodiscard]] const fexma::record_tract::Frontier& GetFrontier() const noexcept {
     return core_.GetFrontier();
   }
-  [[nodiscard]] Position current() const noexcept {
+  [[nodiscard]] fexma::record_tract::Position current() const noexcept {
     return GetFrontier().load(std::memory_order_acquire);
   }
 
 private:
-  const Frontier* upstream_frontier_;
+  const fexma::record_tract::Frontier* upstream_frontier_;
   detail::PersistenceCore core_;
 };
 

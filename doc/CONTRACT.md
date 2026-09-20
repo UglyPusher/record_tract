@@ -3,7 +3,7 @@
 ## Core public API
 
 ```cpp
-namespace fexma::wal {
+namespace fexma::record_tract {
 
 using Position = std::uint64_t;
 using Frontier = std::atomic<Position>;
@@ -109,6 +109,9 @@ Constructed -> Open -> Closed
 reopen operation.
 
 ## Persistence API and durability
+
+Persistence is declared in `namespace fexma::wal` and uses Core types from
+`namespace fexma::record_tract`.
 
 ```cpp
 struct PhysicalWalConfig {

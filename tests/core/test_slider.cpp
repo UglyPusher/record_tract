@@ -10,7 +10,7 @@
 #include <cstdint>
 #include <span>
 
-using namespace fexma::wal;
+using namespace fexma::record_tract;
 
 namespace {
 using Payload = std::array<std::byte, 8>;

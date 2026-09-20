@@ -14,6 +14,7 @@
 #include <fstream>
 #include <span>
 
+using namespace fexma::record_tract;
 using namespace fexma::wal;
 
 namespace {
