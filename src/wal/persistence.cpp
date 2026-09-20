@@ -8,7 +8,6 @@
 
 #include "physical_wal_adapter.hpp"
 
-#include <cassert>
 #include <exception>
 #include <limits>
 #include <new>
@@ -25,7 +24,9 @@ using fexma::record_tract::SliderStatus;
 detail::PersistenceCore::PersistenceCore(const RecordTape& source,
                                          PersistencePolicy policy) noexcept
     : source_(source), policy_(policy) {
-  assert(policy_.sync_count > 0);
+  if (policy_.sync_count == 0) [[unlikely]] {
+    std::terminate();
+  }
 }
 
 detail::PersistenceCore::~PersistenceCore() { (void)close(); }

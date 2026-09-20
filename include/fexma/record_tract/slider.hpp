@@ -10,7 +10,6 @@
 
 #include <atomic>
 #include <algorithm>
-#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -39,8 +38,9 @@ public:
          Module& module, ExecutionPolicy policy) noexcept
       : source_(source), upstream_frontier_(&upstream_frontier), module_(module),
         policy_(policy) {
-    assert(policy_.read_count > 0);
-    assert(policy_.publish_count > 0);
+    if (policy_.read_count == 0 || policy_.publish_count == 0) [[unlikely]] {
+      std::terminate();
+    }
   }
 
   [[nodiscard]] SliderStatus process() noexcept {
