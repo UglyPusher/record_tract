@@ -60,6 +60,7 @@ private:
   std::unique_ptr<PhysicalWalAdapter> physical_wal_{};
   std::uint64_t first_sequence_{};
   std::atomic<bool> failed_{false};
+  bool opened_once_{false};
   const PersistencePolicy policy_;
   alignas(64) fexma::record_tract::Frontier frontier_{};
 };

@@ -38,6 +38,9 @@ OpenResult detail::PersistenceCore::open(
     std::terminate();
   }
   if (is_open()) return {OpenStatus::AlreadyOpen};
+  if (opened_once_) [[unlikely]] {
+    std::terminate();
+  }
   const WalConfig adapter_config{
       source_.payload_size(), 1, config.alignment, config.payload_schema_version,
       config.stream_kind, config.stream_id, config.epoch_id,
@@ -52,6 +55,7 @@ OpenResult detail::PersistenceCore::open(
     return {status};
   }
   first_sequence_ = config.first_sequence;
+  opened_once_ = true;
   failed_.store(false, std::memory_order_relaxed);
   return {OpenStatus::Ok};
 }
@@ -103,6 +107,9 @@ bool detail::PersistenceCore::failed() const noexcept {
 }
 
 SliderStatus detail::PersistenceCore::process_until(Position available_end) noexcept {
+  if (!is_open()) [[unlikely]] {
+    std::terminate();
+  }
   if (failed_.load(std::memory_order_acquire)) {
     return SliderStatus::ModuleFailed;
   }
