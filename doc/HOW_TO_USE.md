@@ -1,127 +1,97 @@
 # Core HOW TO USE
 
-This example uses only the public Core headers and implements one stage:
+This example uses only the public Core headers and builds a linear tract with
+one Slider:
 
 ```text
-producer thread -> RecordTape -> Slider<RecordTape, Module>
-                                      |
-                                      v
-                              sole reclaimer
+producer -> Head Frontier -> Slider Frontier == Tail
 ```
 
 The complete compiling example is
 [`examples/basic_tract/main.cpp`](../examples/basic_tract/main.cpp).
 
-## Headers and namespace
-
-Include the Core headers:
+## Setup and bootstrap
 
 ```cpp
 #include <fexma/record_tract/record_tape.hpp>
 #include <fexma/record_tract/slider.hpp>
-```
 
-The headers are physically under `record_tract`, but the current public types
-remain in `fexma::wal`:
+namespace core = fexma::record_tract;
 
-```cpp
-namespace core = fexma::wal;
-```
-
-This example does not use WAL, Persistence, Reader, Recovery, `detail`, or
-private headers.
-
-## Open and publish
-
-`RecordTape` has fixed-size payloads and bounded capacity. Open it before
-starting runtime threads:
-
-```cpp
 core::RecordTape tape;
-if (!tape.open({payload_size, capacity, core::default_alignment}).ok()) {
+Module module;
+core::Slider slider{tape, tape.GetFrontier(), module};
+tape.SetTailRef(slider.GetFrontier());
+
+if (tape.open({payload_size, capacity, core::default_alignment}) !=
+    core::RecordTapeOpenStatus::Ok) {
   return 1;
 }
 ```
 
-The producer is the sole caller of `try_publish()`. A successful result returns
-the absolute published position. `PublishStatus::Full` is normal transient
-backpressure and can be retried; other failures stop the composition.
+All topology wiring must happen before `open()`. The terminal Frontier owner
+must outlive the Tape. `SetTailRef()` after open is a lifecycle violation and
+terminates.
 
-## Module and Slider
+`RecordTape` is a bounded preallocated ring. The producer is the sole caller
+of `try_publish()`. A successful result contains an absolute position;
+`PublishStatus::Full` is normal transient backpressure.
 
-A module synchronously processes one borrowed `RecordView` and returns `true`
-only when that position is complete:
+## Module and processing
 
 ```cpp
 class Module final {
 public:
-  bool process(const core::RecordView&) noexcept {
-    ++processed_;
-    return true;
+  bool process(const core::RecordView& record) noexcept {
+    // Complete this position before returning true.
+    return consume(record);
   }
-
-private:
-  core::Position processed_{};
 };
 ```
 
-Construct the root Slider with the tape as both source and predecessor. The
-default `ExecutionPolicy{1, 1}` is used:
+`Slider` receives its upstream Frontier explicitly:
 
 ```cpp
-Module module;
-core::Slider<core::RecordTape, Module> slider(tape, module);
+core::Slider first{tape, tape.GetFrontier(), module_a};
+core::Slider second{tape, first.GetFrontier(), module_b};
 ```
 
-The Slider stores references to the tape, predecessor, and module. Each of
-those objects must outlive the Slider. Only one runtime executor may mutate a
-given Slider by calling `process_available()`.
+It does not depend on an upstream object. A Slider reads only
+`[current, upstream_frontier)`. A Frontier publication certifies completion of
+all positions below it and retirement of their borrowed views.
 
-`process_available()` is synchronous. `SliderResult::ok()` is true for both
-`SliderStatus::Processed` and `SliderStatus::Empty`; `Empty` means that the
-predecessor frontier had no new records at the observation point. Other Slider
-statuses are failures for this minimal example.
+```cpp
+const core::SliderStatus result = slider.process();
+```
 
-## Frontiers and reclaim
+`Processed` means the Slider advanced its Frontier, `Empty` means no new
+upstream positions were observed, and `ModuleFailed` is the module runtime
+failure outcome. Broken frontier, view, and lifecycle invariants fail fast.
 
-`RecordTape::GetFrontier()` is the published producer end and equals `head()`.
-`Slider::GetFrontier()` is the exclusive end of records successfully processed
-by the module. A position `p` is protected until the Slider has published at
-least `p + 1`.
+## Tail and lifecycle
 
-The Slider executor is also the sole reclaimer in this one-stage topology. It
-calls `reclaim(slider.GetFrontier())` only after `process_available()` returns;
-that return retires the Slider's borrowed views. Publishing the Slider frontier
-alone does not release storage.
+The terminal Slider Frontier is the Tape Tail/reclamation boundary. The Tape
+loads that Frontier directly when checking capacity and when serving views.
+Tail is not maintained as a second progress state.
+
+For a tract without stages, omit `SetTailRef()`: the Tape defaults to observing
+its own Head, so `Tail == Head`.
+
+RecordTape lifecycle is one-shot:
+
+```text
+Constructed -> Open -> Closed
+```
+
+Failed initial configuration or allocation leaves Constructed. `open()` while
+Open returns `AlreadyOpen`; `close()` is terminal and idempotent. Reopening
+after a successful lifetime is a lifecycle violation and terminates. Open,
+close, and all runtime roles must be coordinated; concurrent close with
+publishing or processing is not supported.
 
 ## Drain and shutdown
 
-The producer publishes an atomic completion flag only after its final
-successful publication. The executor continues processing after that flag until
-both conditions hold:
-
-```text
-producer_done == true
-Slider::GetFrontier() == RecordTape::GetFrontier()
-```
-
-At that point the producer and executor threads are joined. Only then may the
-tape be closed. If either thread observes a non-transient error, it signals the
-shared failure flag so the other thread can stop and the composition can join
-both threads before closing the tape.
-
-The example uses `std::this_thread::yield()` as a minimal retry policy for
-`Full` and `Empty`. Core does not provide a scheduler, wait strategy, worker
-thread, or drain abstraction.
-
-## In-tree CMake
-
-The repository's current build tree exposes the Core target directly:
-
-```cmake
-add_executable(example_basic_tract examples/basic_tract/main.cpp)
-target_link_libraries(example_basic_tract PRIVATE fexma::record_tract)
-```
-
-There are no install rules or `find_package`/package-export claims for this
-example.
+The producer and stage executor must be joined before closing the Tape. All
+borrowed views must be retired before the terminal Frontier is allowed to pass
+their positions and before close. Core supplies no scheduler, wait strategy,
+worker, or drain abstraction.

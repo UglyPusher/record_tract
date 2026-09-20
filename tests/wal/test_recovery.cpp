@@ -16,6 +16,7 @@
 #include <fstream>
 #include <vector>
 
+using namespace fexma::record_tract;
 using namespace fexma::wal;
 
 namespace {
@@ -55,16 +56,16 @@ payload(std::uint64_t value) noexcept {
                               std::uint32_t records) {
   std::filesystem::remove(path);
   RecordTape tape;
-  Persistence persistence(tape, tape,
+  Persistence persistence(tape, tape.GetFrontier(),
                           PersistencePolicy{records == 0 ? 1u : records});
-  if (!tape.open({config.payload_size, records == 0 ? 1u : records,
-                  config.alignment})
-           .ok()) {
+  tape.SetTailRef(persistence.GetFrontier());
+  if (tape.open({config.payload_size, records == 0 ? 1u : records,
+                 config.alignment}) != RecordTapeOpenStatus::Ok) {
     return false;
   }
   const PhysicalWalConfig physical_config{
-      config.payload_size,           config.alignment,
-      config.payload_schema_version, config.stream_kind,
+      config.alignment,              config.payload_schema_version,
+      config.stream_kind,
       config.stream_id,              config.epoch_id,
       config.first_sequence,         config.manifest_id};
   if (!persistence.open(path, physical_config).ok()) {
@@ -76,9 +77,9 @@ payload(std::uint64_t value) noexcept {
       return false;
     }
   }
-  const SliderResult processed = persistence.process_available();
-  return (records == 0 ? processed.status == SliderStatus::Empty
-                       : processed.status == SliderStatus::Processed) &&
+  const SliderStatus processed = persistence.process();
+  return (records == 0 ? processed == SliderStatus::Empty
+                       : processed == SliderStatus::Processed) &&
          persistence.close();
 }
 

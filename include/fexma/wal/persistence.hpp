@@ -11,14 +11,12 @@
 #include <fexma/wal/types.hpp>
 
 #include <atomic>
-#include <concepts>
 #include <filesystem>
 #include <memory>
 
 namespace fexma::wal {
 
 struct PhysicalWalConfig {
-  std::uint32_t payload_size{};
   std::uint32_t alignment{wal_default_alignment};
   std::uint32_t payload_schema_version{};
   StreamKind stream_kind{StreamKind::Generic};
@@ -36,7 +34,8 @@ namespace detail {
 class PhysicalWalAdapter;
 class PersistenceCore final {
 public:
-  PersistenceCore(const RecordTape& source, PersistencePolicy policy) noexcept;
+  PersistenceCore(const fexma::record_tract::RecordTape& source,
+                  PersistencePolicy policy) noexcept;
   ~PersistenceCore();
 
   PersistenceCore(const PersistenceCore&) = delete;
@@ -47,35 +46,32 @@ public:
   [[nodiscard]] bool close() noexcept;
   [[nodiscard]] bool is_open() const noexcept;
   [[nodiscard]] bool failed() const noexcept;
-  [[nodiscard]] SliderResult process_until(Position available_end) noexcept;
-  [[nodiscard]] Position GetFrontier() const noexcept;
-  void reset_quiescent(Position initial) noexcept;
+  [[nodiscard]] fexma::record_tract::SliderStatus
+  process_until(fexma::record_tract::Position available_end) noexcept;
+  [[nodiscard]] const fexma::record_tract::Frontier& GetFrontier() const noexcept;
 
 private:
-  [[nodiscard]] bool append(const RecordView& record) noexcept;
+  [[nodiscard]] bool append(
+      const fexma::record_tract::RecordView& record) noexcept;
   [[nodiscard]] bool sync() noexcept;
-  void publish(Position end) noexcept;
+  void publish(fexma::record_tract::Position end) noexcept;
 
-  const RecordTape& source_;
+  const fexma::record_tract::RecordTape& source_;
   std::unique_ptr<PhysicalWalAdapter> physical_wal_{};
   std::uint64_t first_sequence_{};
   std::atomic<bool> failed_{false};
+  bool opened_once_{false};
   const PersistencePolicy policy_;
-  alignas(64) std::atomic<Position> frontier_{};
+  alignas(64) fexma::record_tract::Frontier frontier_{};
 };
 } // namespace detail
 
-template <class Predecessor>
 class Persistence final {
 public:
-  Persistence(const RecordTape& source, const Predecessor& predecessor,
+  Persistence(const fexma::record_tract::RecordTape& source,
+              const fexma::record_tract::Frontier& upstream_frontier,
               PersistencePolicy policy = {}) noexcept
-      : predecessor_(predecessor), core_(source, policy) {}
-
-  explicit Persistence(const RecordTape& source,
-                       PersistencePolicy policy = {}) noexcept
-      requires std::same_as<Predecessor, RecordTape>
-      : Persistence(source, source, policy) {}
+      : upstream_frontier_(&upstream_frontier), core_(source, policy) {}
 
   ~Persistence() = default;
 
@@ -92,24 +88,21 @@ public:
   [[nodiscard]] bool is_open() const noexcept { return core_.is_open(); }
   [[nodiscard]] bool failed() const noexcept { return core_.failed(); }
 
-  [[nodiscard]] SliderResult process_available() noexcept {
-    return core_.process_until(predecessor_.GetFrontier());
+  [[nodiscard]] fexma::record_tract::SliderStatus process() noexcept {
+    const fexma::record_tract::Position available_end =
+        upstream_frontier_->load(std::memory_order_acquire);
+    return core_.process_until(available_end);
   }
-  [[nodiscard]] Position GetFrontier() const noexcept {
+  [[nodiscard]] const fexma::record_tract::Frontier& GetFrontier() const noexcept {
     return core_.GetFrontier();
   }
-  [[nodiscard]] Position current() const noexcept { return GetFrontier(); }
-  void reset_quiescent(Position initial) noexcept {
-    core_.reset_quiescent(initial);
+  [[nodiscard]] fexma::record_tract::Position current() const noexcept {
+    return GetFrontier().load(std::memory_order_acquire);
   }
 
 private:
-  const Predecessor& predecessor_;
+  const fexma::record_tract::Frontier* upstream_frontier_;
   detail::PersistenceCore core_;
 };
-
-Persistence(const RecordTape&) -> Persistence<RecordTape>;
-
-Persistence(const RecordTape&, PersistencePolicy) -> Persistence<RecordTape>;
 
 } // namespace fexma::wal

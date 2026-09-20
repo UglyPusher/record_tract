@@ -1,209 +1,150 @@
 # Record Tract Invariants
 
-## RecordTape Boundary Order
+## Topology
 
-`RecordTape` intrinsically owns only two monotonic absolute zero-based
-boundaries:
+The supported topology is a linear ordered chain:
+
+```text
+Head Frontier -> Stage Frontier -> ... -> terminal Frontier == Tail
+```
+
+There is no branching, DAG, topology registry, or separate Tail publication
+atomic.
+
+Topology wiring is completed before `RecordTape::open()` and is immutable during
+runtime. `SetTailRef()` after open is a programmer/lifecycle error. Every
+stored Frontier reference must outlive the object observing it.
+
+## RecordTape boundaries
+
+`RecordTape` owns a bounded preallocated ring with these boundaries:
 
 ```text
 tail <= head
 head - tail <= capacity
 ```
 
+- Head is published only by the single producer.
 - `[tail, head)` contains published retained positions.
-- `[head, tail + capacity)` is free capacity.
-- Only the producer writes `head`.
-- Only the composition/reclaimer writes `tail`.
-- `reclaim(end)` cannot move backward or beyond observed `head`.
-- The composition advances `tail` only after every mandatory reader has
-  finished the reclaimed positions.
+- `tail` is an acquire observation of the terminal stage Frontier.
+- Producer reuse is allowed only after the terminal Frontier has passed the
+  old position.
+- A zero-stage Tape observes its own Head, so `Tail == Head`.
 
-`RecordTape` contains no `durable` frontier, file writer, or persistence failure
-state.
+`RecordTape` maps an absolute Position to `position % capacity` only after
+checking the absolute range. The nested `Buffer` owns aligned allocation and
+slot layout; it does not own ring progress.
 
-## Processing Frontier Order
+## Frontier ownership
 
-A Slider's internally owned frontier is its single authoritative current
-exclusive end:
-
-```text
-own frontier <= observed upstream frontier
-```
-
-- The predecessor reference is const and supplies the permitted boundary
-  through `GetFrontier()`.
-- The Slider owns and publishes its processing frontier. A valid composition
-  has one runtime executor mutating that Slider while observers use
-  `GetFrontier()`.
-- A range must begin at the Slider's own frontier value acquired at entry and
-  end no later than the predecessor frontier acquired at entry.
-- A record view is obtained by its absolute zero-based position.
-- The module must complete position `p` successfully before the own frontier
-  becomes `p + 1`.
-- Own frontier publication occurs only after successful module completion.
-- Release publication of exclusive end `p + 1` makes module output for
-  position `p` visible to an acquire-reading downstream stage.
-- The composition may reclaim only through progress that all mandatory stages
-  protecting retention have completed and only after all borrowed views have
-  been retired.
-
-The slider mechanics allocate no storage, copy no payload, interpret no record
-kind, and perform no persistence, snapshot I/O, waiting, or scheduling.
-
-Execution policy preserves these traversal and publication invariants:
-
-- `read_count` partitions the observed predecessor range into internal passes;
-  it does not limit the total records processed by one successful
-  `process_available()` call;
-- with the current per-position zero-copy view path, changing a valid
-  `read_count` does not change externally observable successful processing;
-- `publish_count` is the number of successful records between processed-frontier
-  publications;
-- a final successful residual prefix is published before return;
-- a successful residual prefix before module or view failure is published, but
-  the failed or unavailable position is not;
-- if either count is zero, the complete policy is normalized to the canonical
-  `{1, 1}` policy.
-
-For the bare linear composition:
+Each stage owns exactly one mutable Frontier and exposes only a read-only view
+to downstream composition. A Frontier value `N` means:
 
 ```text
-tail <= NoOpF <= head
+all positions < N are complete for that owner
+the owner retains no views/references to those positions
 ```
 
-`NoOpF` is the value returned by `no_op_slider.GetFrontier()`. Its publication
-certifies module completion but does not reclaim a position. Only the
-composition writes `tail`, after the corresponding Slider call has returned
-and its borrowed views are retired. Stopping either Slider
-execution or composition reclamation therefore preserves bounded backpressure.
+The Slider owns its own Frontier and receives only `const Frontier&` upstream.
+Persistence owns its durable Frontier and receives only `const Frontier&`
+upstream. No stage obtains upstream progress through an upstream object.
 
-For a linear dependency chain of processing stages, processing progress obeys:
+For a stage:
 
 ```text
-Fn <= ... <= F2 <= F1 <= head
+current_frontier <= upstream_frontier <= head
 ```
 
-This ordering describes processing dependencies only; it does not define the
-reclamation boundary. Independently, `RecordTape` always maintains
-`tail <= head`. The composition may advance `tail` only to a boundary proven
-safe for every mandatory stage, reader, or other participant that protects
-retention.
+It may process only `[current_frontier, upstream_frontier)`. A regression or a
+failed view in a correctly composed tract is a broken invariant and fails fast.
 
-The number of stages is not part of the tract contract. A composition may also
-have multiple stages using the same predecessor boundary; each Slider owns and
-publishes its own processing frontier.
+## Publication ordering
 
-## Core Ownership
+For each producer/stage handoff:
 
-- A free block is owned by the producer while it fills the payload.
-- Publication of `head` makes the completed payload immutable and visible to
-  coordinated readers.
-- Processing stages borrow immutable `RecordView` values without owning the
-  underlying slot.
-- A processing frontier certifies completion by its stage; publishing that
-  frontier does not reclaim the block.
-- Publication of `tail` releases the block for producer reuse.
+1. producer writes the payload;
+2. producer publishes Head with release semantics;
+3. stage acquires the upstream Frontier before using the record;
+4. stage completes its work and publishes its Frontier with release semantics;
+5. downstream stage acquires that Frontier;
+6. terminal Frontier publication is acquired by the producer before slot reuse.
 
-A block cannot be overwritten until `tail` passes its previous absolute
-position.
+No `seq_cst` operation is required. These guarantees assume one producer per
+Tape, one runtime executor per Slider/Persistence, and quiescent lifecycle
+operations.
 
-Borrowed view readers do not own or advance `tail`. Before obtaining a view and
-throughout its use, they must ensure reclamation cannot pass its position. The
-view neither pins the slot nor survives close/destruction/reopen. Absolute range
-validation precedes slot mapping, preventing a reclaimed position from being
-interpreted as the new record in a reused slot under this contract.
+## Borrowed views
 
-## Core Publication Order
+`RecordTape::try_view()` is a direct non-owning access API. `ViewStatus` remains
+valid for direct callers:
 
-For one processing dependency:
+- `Closed` — Tape is not open;
+- `Reclaimed` — position is below Tail;
+- `Unpublished` — position is at or beyond Head;
+- `Ok` — position is retained and published.
+
+The returned span does not pin a slot or register a reader. A caller must keep
+the terminal Frontier from passing the position while the view is in use. A
+Slider or Persistence receiving `Closed`, `Reclaimed`, or `Unpublished` means
+the tract invariant was broken; those stages terminate instead of returning a
+runtime status.
+
+## Slider policy and status
+
+`ExecutionPolicy::read_count` and `publish_count` must be greater than zero.
+They are bootstrap preconditions, not normalization inputs. `read_count` only
+partitions internal traversal. `publish_count` controls Frontier publication
+cadence. A module must complete a position before the Slider publishes the next
+exclusive Frontier value.
+
+Valid Slider outcomes are:
+
+- `Processed` — progress was published;
+- `Empty` — no new upstream progress was observed;
+- `ModuleFailed` — the module returned failure.
+
+Broken frontier, view, and lifecycle invariants are not runtime outcomes.
+
+## Persistence durability
 
 ```text
-producer --RecordTape::GetFrontier()--> Slider
-                                          |
-                                          v
-                              Slider::GetFrontier() --> downstream stage
+RecordTape / upstream Frontier -> Persistence -> PhysicalWalAdapter
 ```
 
-- Payload copy happens before `head.store(..., release)`.
-- Retained view access acquires `head` before exposing payload bytes.
-- A Slider acquires `predecessor.GetFrontier()` before processing available
-  records from its separately supplied tape.
-- Module completion for position `p` happens before publication of frontier
-  `p + 1`.
-- A downstream stage acquires its predecessor's frontier through
-  `GetFrontier()` before relying on the corresponding module output.
-- Reclamation happens only after the composition has established that all
-  mandatory users of the reclaimed positions are finished.
-- Producer acquires `tail` before reusing capacity.
+The source Tape is open before Persistence bootstrap. Payload size comes from
+the Tape. Physical WAL geometry remains owned by the WAL configuration and
+adapter.
 
-No frontier operation uses `seq_cst`.
-
-## Persistence Composition Invariants
-
-Persistence is a specialized stage. In a composition where
-`Persistence<RecordTape>` uses the tape as its predecessor, the tape's
-`GetFrontier()` supplies the permitted boundary and the persistence-owned
-frontier may be named `durable`:
+For every non-empty batch:
 
 ```text
-tail <= durable <= head
-head - tail <= capacity
+append all records -> sync -> publish durable Frontier
 ```
 
-- `[durable, head)` is published to the tract but not yet certified durable.
-- `[tail, head)` remains accessible through read-only `try_view()` under the
-  caller-owned retention contract; accessibility does not prove durability.
-- Position `p` maps to block `p % capacity` only after absolute range
-  validation.
-- The `Persistence` stage owns and publishes the `durable` frontier.
-- Append and physical sync of the complete selected batch happen before
-  publication of its batch-end durable frontier.
-- A downstream stage that requires durability must acquire and obey the
-  durable frontier before processing a position.
+Append failure, sync failure, and physical sequence exhaustion set sticky
+terminal `failed_`. While Failed:
 
-`durable` is the semantic name of this persistence stage's frontier. It is not
-an intrinsic `RecordTape` boundary.
+- every `process()` returns `ModuleFailed`;
+- no append or sync occurs;
+- durable Frontier does not advance;
+- pending upstream work is irrelevant.
 
-## Memory
+Lifecycle misuse and broken tract invariants do not set `failed_`.
 
-- Storage contains exactly `capacity` fixed-stride blocks.
-- Every block address satisfies configured `alignment`.
-- The complete allocation is zeroed during `open()` to commit and touch every
-  page before role threads start.
-- No allocation occurs in publish, slider processing, persistence advance, or
-  position view.
+## Lifecycle
 
-## Failure
+RecordTape lifecycle:
 
-For a generic slider:
+```text
+Constructed -> Open -> Closed
+```
 
-- module failure at position `p` does not publish `p + 1`;
-- the own frontier remains at the first uncompleted position;
-- the composition decides whether and when to retry or stop.
+- failed initial configuration/allocation leaves Constructed;
+- successful `open()` starts the only lifetime;
+- `open()` while Open returns `AlreadyOpen`;
+- `close()` is terminal and idempotent;
+- `open()` after Close terminates;
+- `open()` and `close()` are quiescent operations.
 
-For persistence:
-
-- empty durability batches do not append or synchronize;
-- a failed append or sync does not move `durable`;
-- retained views remain independent of durability and do not grant downstream
-  permission;
-- a failed Persistence prevents further durable progress for the current
-  open writer lifetime.
-
-Persistence owns its terminal failure state for the current open writer
-lifetime; `RecordTape` remains unaware of it. Closing that lifetime and later
-successfully opening a new writer lifetime clears the failure state. A
-composition with mandatory persistence must stop production or otherwise
-preserve bounded safety after observing failure in the active lifetime.
-
-## Post-Crash WAL Prefix
-
-- The maximal contiguous fully validated prefix is the authoritative recovered
-  WAL. Validation includes physical identity and format, header integrity,
-  contiguous sequence, payload integrity, record boundaries, and zero padding;
-  it is not limited to CRC checks.
-- Every complete record in that prefix participates in replay and rebuild.
-- Client acknowledgement state does not change the recovered prefix.
-- Batches and the runtime `durable` frontier are not persisted as separate
-  commit metadata.
-- The physical format has no batch commit record or commit marker.
+Persistence processing and close likewise require quiescent roles. Persistence
+reopen is not part of the current contract.

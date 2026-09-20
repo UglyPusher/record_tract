@@ -8,23 +8,41 @@
 
 #include "physical_wal_adapter.hpp"
 
+#include <exception>
 #include <limits>
 #include <new>
 
 namespace fexma::wal {
 
+using fexma::record_tract::AccessResult;
+using fexma::record_tract::Frontier;
+using fexma::record_tract::Position;
+using fexma::record_tract::RecordTape;
+using fexma::record_tract::RecordView;
+using fexma::record_tract::SliderStatus;
+
 detail::PersistenceCore::PersistenceCore(const RecordTape& source,
                                          PersistencePolicy policy) noexcept
-    : source_(source), policy_(policy.sync_count == 0 ? PersistencePolicy{} : policy) {}
+    : source_(source), policy_(policy) {
+  if (policy_.sync_count == 0) [[unlikely]] {
+    std::terminate();
+  }
+}
 
 detail::PersistenceCore::~PersistenceCore() { (void)close(); }
 
 OpenResult detail::PersistenceCore::open(
     const std::filesystem::path& path,
     const PhysicalWalConfig& config) noexcept {
+  if (!source_.is_open()) [[unlikely]] {
+    std::terminate();
+  }
   if (is_open()) return {OpenStatus::AlreadyOpen};
+  if (opened_once_) [[unlikely]] {
+    std::terminate();
+  }
   const WalConfig adapter_config{
-      config.payload_size, 1, config.alignment, config.payload_schema_version,
+      source_.payload_size(), 1, config.alignment, config.payload_schema_version,
       config.stream_kind, config.stream_id, config.epoch_id,
       config.first_sequence, config.manifest_id};
   if (!valid_config(adapter_config)) return {OpenStatus::InvalidConfig};
@@ -37,13 +55,19 @@ OpenResult detail::PersistenceCore::open(
     return {status};
   }
   first_sequence_ = config.first_sequence;
+  opened_once_ = true;
   failed_.store(false, std::memory_order_relaxed);
   return {OpenStatus::Ok};
 }
 
 bool detail::PersistenceCore::append(const RecordView& record) noexcept {
-  if (!is_open() || failed_.load(std::memory_order_acquire) ||
-      record.position > std::numeric_limits<std::uint64_t>::max() -
+  if (!is_open()) [[unlikely]] {
+    std::terminate();
+  }
+  if (failed_.load(std::memory_order_acquire)) {
+    return false;
+  }
+  if (record.position > std::numeric_limits<std::uint64_t>::max() -
                             first_sequence_ ||
       !physical_wal_->append_record(first_sequence_ + record.position,
                                     record.payload)) {
@@ -54,8 +78,13 @@ bool detail::PersistenceCore::append(const RecordView& record) noexcept {
 }
 
 bool detail::PersistenceCore::sync() noexcept {
-  if (!is_open() || failed_.load(std::memory_order_acquire) ||
-      !physical_wal_->sync()) {
+  if (!is_open()) [[unlikely]] {
+    std::terminate();
+  }
+  if (failed_.load(std::memory_order_acquire)) {
+    return false;
+  }
+  if (!physical_wal_->sync()) {
     failed_.store(true, std::memory_order_release);
     return false;
   }
@@ -77,13 +106,20 @@ bool detail::PersistenceCore::failed() const noexcept {
   return failed_.load(std::memory_order_acquire);
 }
 
-SliderResult detail::PersistenceCore::process_until(Position available_end) noexcept {
-  Position current = GetFrontier();
-  if (available_end < current) {
-    return {SliderStatus::UpstreamRegression, current, 0};
+SliderStatus detail::PersistenceCore::process_until(Position available_end) noexcept {
+  if (!is_open()) [[unlikely]] {
+    std::terminate();
+  }
+  if (failed_.load(std::memory_order_acquire)) {
+    return SliderStatus::ModuleFailed;
+  }
+  Position current =
+      GetFrontier().load(std::memory_order_acquire);
+  if (available_end < current) [[unlikely]] {
+    std::terminate();
   }
   if (available_end == current) {
-    return {SliderStatus::Empty, current, 0};
+    return SliderStatus::Empty;
   }
 
   const Position available_count = available_end - current;
@@ -91,33 +127,26 @@ SliderResult detail::PersistenceCore::process_until(Position available_end) noex
                              ? available_count
                              : policy_.sync_count;
   const Position batch_end = current + count;
-  std::uint64_t processed_count = 0;
   while (current < batch_end) {
     const AccessResult access = source_.try_view(current);
-    if (!access.ok()) {
-      return {SliderStatus::ViewUnavailable, current, processed_count,
-              access.status};
+    if (!access.ok()) [[unlikely]] {
+      std::terminate();
     }
     if (!append(access.record)) {
-      return {SliderStatus::ModuleFailed, current, processed_count};
+      return SliderStatus::ModuleFailed;
     }
     ++current;
-    ++processed_count;
   }
 
   if (!sync()) {
-    return {SliderStatus::ModuleFailed, current, processed_count};
+    return SliderStatus::ModuleFailed;
   }
   publish(current);
-  return {SliderStatus::Processed, current, processed_count};
+  return SliderStatus::Processed;
 }
 
-Position detail::PersistenceCore::GetFrontier() const noexcept {
-  return frontier_.load(std::memory_order_acquire);
-}
-
-void detail::PersistenceCore::reset_quiescent(Position initial) noexcept {
-  frontier_.store(initial, std::memory_order_relaxed);
+const Frontier& detail::PersistenceCore::GetFrontier() const noexcept {
+  return frontier_;
 }
 
 void detail::PersistenceCore::publish(Position end) noexcept {

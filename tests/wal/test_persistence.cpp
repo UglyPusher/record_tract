@@ -13,13 +13,19 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <span>
 
+using namespace fexma::record_tract;
 using namespace fexma::wal;
 
 namespace {
 
 using Payload = std::array<std::byte, 8>;
+
+[[nodiscard]] Position read_frontier(const Frontier& frontier) noexcept {
+  return frontier.load(std::memory_order_acquire);
+}
 
 class PhysicalControlGuard final {
 public:
@@ -34,17 +40,6 @@ public:
 
   PhysicalControlGuard(const PhysicalControlGuard&) = delete;
   PhysicalControlGuard& operator=(const PhysicalControlGuard&) = delete;
-};
-
-class TestPredecessor final {
-public:
-  explicit TestPredecessor(const Position& frontier) noexcept
-      : frontier_(frontier) {}
-
-  [[nodiscard]] Position GetFrontier() const noexcept { return frontier_; }
-
-private:
-  const Position& frontier_;
 };
 
 [[nodiscard]] std::filesystem::path test_path(const char* name) {
@@ -80,18 +75,17 @@ constexpr WalConfig wal_config{static_cast<std::uint32_t>(sizeof(Payload)),
                                12};
 
 constexpr PhysicalWalConfig physical_config{
-    wal_config.payload_size,           wal_config.alignment,
-    wal_config.payload_schema_version, wal_config.stream_kind,
+    wal_config.alignment,              wal_config.payload_schema_version,
+    wal_config.stream_kind,
     wal_config.stream_id,              wal_config.epoch_id,
     wal_config.first_sequence,         wal_config.manifest_id};
 
-template <class Predecessor>
 [[nodiscard]] bool open(RecordTape& tape,
-                        Persistence<Predecessor>& persistence,
+                        Persistence& persistence,
                         const std::filesystem::path& path) {
+  tape.SetTailRef(persistence.GetFrontier());
   return tape.open({wal_config.payload_size, wal_config.capacity,
-                   wal_config.alignment})
-             .ok() &&
+                    wal_config.alignment}) == RecordTapeOpenStatus::Ok &&
          persistence.open(path, physical_config).ok();
 }
 
@@ -105,19 +99,21 @@ template <class Predecessor>
   std::filesystem::remove(path);
 
   RecordTape tape;
-  Persistence persistence(tape, tape, PersistencePolicy{3});
+  Persistence persistence(tape, tape.GetFrontier(), PersistencePolicy{3});
   if (!open(tape, persistence, path)) return false;
 
   for (Position position = 0; position < 3; ++position) {
     if (!publish(tape, position)) return false;
   }
-  if (persistence.process_available().status != SliderStatus::Processed ||
+  if (persistence.process() != SliderStatus::Processed ||
       !persistence.close() || persistence.failed()) {
     return false;
   }
 
-  // Runtime storage remains open and readable after persistence closes.
-  if (!tape.is_open() || !tape.try_view(2).ok()) return false;
+  // Runtime storage remains open after persistence closes, but its terminal
+  // frontier has reclaimed the records it processed.
+  if (!tape.is_open() ||
+      tape.try_view(2).status != ViewStatus::Reclaimed) return false;
   tape.close();
 
   WalReader reader;
@@ -141,45 +137,52 @@ template <class Predecessor>
   std::filesystem::remove(path);
 
   RecordTape tape;
-  Persistence persistence(tape, tape, PersistencePolicy{2});
-  if (!open(tape, persistence, path)) return false;
+  Persistence persistence(tape, tape.GetFrontier(), PersistencePolicy{2});
+  auto& persistence_slider = persistence;
+  NoOpModule no_op;
+  Slider no_op_slider(tape, persistence_slider.GetFrontier(), no_op);
+  tape.SetTailRef(no_op_slider.GetFrontier());
+  if (tape.open({wal_config.payload_size, wal_config.capacity,
+                 wal_config.alignment}) != RecordTapeOpenStatus::Ok ||
+      !persistence.open(path, physical_config).ok()) {
+    return false;
+  }
   for (std::uint64_t value = 0; value < 5; ++value) {
     if (!publish(tape, value)) return false;
   }
 
-  auto& persistence_slider = persistence;
-  NoOpModule no_op;
-  Slider no_op_slider(tape, persistence_slider, no_op);
-
   detail::PhysicalWalFileTestControl control{};
   PhysicalControlGuard guard(control);
 
-  const SliderResult first = persistence_slider.process_available();
-  if (!first.ok() || first.processed_count != 2 ||
-      persistence_slider.GetFrontier() != 2 || control.append_calls != 2 ||
-      control.sync_calls != 1 || !no_op_slider.process_available().ok() ||
-      no_op_slider.GetFrontier() != 2 ||
-      tape.reclaim(no_op_slider.GetFrontier()) != ReclaimStatus::Ok) {
+  const SliderStatus first = persistence_slider.process();
+  if (first != SliderStatus::Processed ||
+      read_frontier(persistence_slider.GetFrontier()) != 2 ||
+      control.append_calls != 2 ||
+      control.sync_calls != 1 ||
+      no_op_slider.process() != SliderStatus::Processed ||
+      read_frontier(no_op_slider.GetFrontier()) != 2 ||
+      tape.tail() != 2) {
     return false;
   }
 
-  const SliderResult second = persistence_slider.process_available();
-  if (!second.ok() || second.processed_count != 2 ||
-      persistence_slider.GetFrontier() != 4 || control.append_calls != 4 ||
-      control.sync_calls != 2 || !no_op_slider.process_available().ok() ||
-      no_op_slider.GetFrontier() != 4 ||
-      tape.reclaim(no_op_slider.GetFrontier()) != ReclaimStatus::Ok) {
+  const SliderStatus second = persistence_slider.process();
+  if (second != SliderStatus::Processed ||
+      read_frontier(persistence_slider.GetFrontier()) != 4 ||
+      control.append_calls != 4 ||
+      control.sync_calls != 2 ||
+      no_op_slider.process() != SliderStatus::Processed ||
+      read_frontier(no_op_slider.GetFrontier()) != 4 ||
+      tape.tail() != 4) {
     return false;
   }
 
-  const SliderResult third = persistence_slider.process_available();
-  const SliderResult empty = persistence_slider.process_available();
-  if (!third.ok() || third.processed_count != 1 ||
-      empty.status != SliderStatus::Empty || persistence_slider.GetFrontier() != 5 ||
+  const SliderStatus third = persistence_slider.process();
+  const SliderStatus empty = persistence_slider.process();
+  if (third != SliderStatus::Processed || empty != SliderStatus::Empty ||
+      read_frontier(persistence_slider.GetFrontier()) != 5 ||
       control.append_calls != 5 || control.sync_calls != 3 ||
-      !no_op_slider.process_available().ok() ||
-      no_op_slider.GetFrontier() != 5 ||
-      tape.reclaim(no_op_slider.GetFrontier()) != ReclaimStatus::Ok ||
+      no_op_slider.process() != SliderStatus::Processed ||
+      read_frontier(no_op_slider.GetFrontier()) != 5 ||
       tape.tail() != 5 || tape.head() != 5) {
     return false;
   }
@@ -212,7 +215,7 @@ template <class Predecessor>
   const auto path = test_path(name);
   std::filesystem::remove(path);
   RecordTape tape;
-  Persistence persistence(tape, tape, policy);
+  Persistence persistence(tape, tape.GetFrontier(), policy);
   if (!open(tape, persistence, path) || !publish(tape, 0) ||
       !publish(tape, 1)) {
     return false;
@@ -221,12 +224,11 @@ template <class Predecessor>
   bool valid = false;
   {
     PhysicalControlGuard guard(control);
-    const SliderResult first = persistence.process_available();
-    const SliderResult second = persistence.process_available();
-    valid = first.status == SliderStatus::Processed &&
-            first.processed_count == 1 && persistence.GetFrontier() == 2 &&
-            second.status == SliderStatus::Processed &&
-            second.processed_count == 1 && control.sync_calls == 2;
+    const SliderStatus first = persistence.process();
+    const SliderStatus second = persistence.process();
+    valid = first == SliderStatus::Processed &&
+            read_frontier(persistence.GetFrontier()) == 2 &&
+            second == SliderStatus::Processed && control.sync_calls == 2;
   }
   valid = valid && persistence.close();
   tape.close();
@@ -238,28 +240,27 @@ template <class Predecessor>
   const auto path = test_path("fexma_wal_persistence_policy_eight.wal");
   std::filesystem::remove(path);
   RecordTape tape;
-  Persistence persistence(tape, tape, PersistencePolicy{8});
-  if (!tape.open({wal_config.payload_size, 32, wal_config.alignment}).ok() ||
+  Persistence persistence(tape, tape.GetFrontier(), PersistencePolicy{8});
+  tape.SetTailRef(persistence.GetFrontier());
+  if (tape.open({wal_config.payload_size, 32, wal_config.alignment}) !=
+          RecordTapeOpenStatus::Ok ||
       !persistence.open(path, physical_config).ok()) {
     return false;
   }
   for (std::uint64_t value = 0; value < 23; ++value) {
     if (!publish(tape, value)) return false;
   }
-  const SliderResult first = persistence.process_available();
-  const Position first_frontier = persistence.GetFrontier();
-  const SliderResult second = persistence.process_available();
-  const Position second_frontier = persistence.GetFrontier();
-  const SliderResult third = persistence.process_available();
-  const Position third_frontier = persistence.GetFrontier();
-  const SliderResult empty = persistence.process_available();
-  const bool valid = first.status == SliderStatus::Processed &&
-                     first.processed_count == 8 && first_frontier == 8 &&
-                     second.status == SliderStatus::Processed &&
-                     second.processed_count == 8 && second_frontier == 16 &&
-                     third.status == SliderStatus::Processed &&
-                     third.processed_count == 7 && third_frontier == 23 &&
-                     empty.status == SliderStatus::Empty;
+  const SliderStatus first = persistence.process();
+  const Position first_frontier = read_frontier(persistence.GetFrontier());
+  const SliderStatus second = persistence.process();
+  const Position second_frontier = read_frontier(persistence.GetFrontier());
+  const SliderStatus third = persistence.process();
+  const Position third_frontier = read_frontier(persistence.GetFrontier());
+  const SliderStatus empty = persistence.process();
+  const bool valid = first == SliderStatus::Processed && first_frontier == 8 &&
+                     second == SliderStatus::Processed && second_frontier == 16 &&
+                     third == SliderStatus::Processed && third_frontier == 23 &&
+                     empty == SliderStatus::Empty;
   (void)persistence.close();
   tape.close();
   std::filesystem::remove(path);
@@ -271,7 +272,7 @@ template <class Predecessor>
   std::filesystem::remove(path);
 
   RecordTape tape;
-  Persistence persistence(tape, tape, PersistencePolicy{2});
+  Persistence persistence(tape, tape.GetFrontier(), PersistencePolicy{2});
   if (!open(tape, persistence, path) || !publish(tape, 0) || !publish(tape, 1)) {
     return false;
   }
@@ -280,12 +281,52 @@ template <class Predecessor>
   detail::PhysicalWalFileTestControl control{};
   control.fail_append_call = 0;
   PhysicalControlGuard guard(control);
-  const SliderResult failed = slider.process_available();
-  const bool valid = failed.status == SliderStatus::ModuleFailed &&
-                     failed.processed_count == 0 && slider.current() == 0 &&
-                     slider.GetFrontier() == 0 && persistence.failed() &&
-                     control.append_calls == 1 && control.sync_calls == 0;
+  const SliderStatus failed = slider.process();
+  const std::uint32_t append_calls = control.append_calls;
+  const std::uint32_t sync_calls = control.sync_calls;
+  const SliderStatus repeated = slider.process();
+  const bool valid = failed == SliderStatus::ModuleFailed &&
+                     repeated == SliderStatus::ModuleFailed &&
+                     slider.current() == 0 &&
+                     read_frontier(slider.GetFrontier()) == 0 &&
+                     persistence.failed() &&
+                     control.append_calls == append_calls &&
+                     control.sync_calls == sync_calls && append_calls == 1 &&
+                     sync_calls == 0;
   (void)persistence.close();
+  tape.close();
+  std::filesystem::remove(path);
+  return valid;
+}
+
+[[nodiscard]] bool sticky_failure_precedes_empty_result() {
+  const auto path = test_path("fexma_wal_persistence_sticky_failure.wal");
+  std::filesystem::remove(path);
+
+  RecordTape tape;
+  detail::PersistenceCore core(tape, PersistencePolicy{});
+  tape.SetTailRef(core.GetFrontier());
+  if (tape.open({wal_config.payload_size, wal_config.capacity,
+                 wal_config.alignment}) != RecordTapeOpenStatus::Ok ||
+      !core.open(path, physical_config).ok() || !publish(tape, 0)) {
+    return false;
+  }
+
+  detail::PhysicalWalFileTestControl control{};
+  control.fail_append_call = 0;
+  PhysicalControlGuard guard(control);
+  const SliderStatus failed = core.process_until(1);
+  const std::uint32_t append_calls = control.append_calls;
+  const std::uint32_t sync_calls = control.sync_calls;
+  const SliderStatus empty = core.process_until(
+      read_frontier(core.GetFrontier()));
+  const bool valid = failed == SliderStatus::ModuleFailed &&
+                     empty == SliderStatus::ModuleFailed && core.failed() &&
+                     read_frontier(core.GetFrontier()) == 0 &&
+                     control.append_calls == append_calls &&
+                     control.sync_calls == sync_calls && append_calls == 1 &&
+                     sync_calls == 0;
+  (void)core.close();
   tape.close();
   std::filesystem::remove(path);
   return valid;
@@ -296,43 +337,55 @@ template <class Predecessor>
   std::filesystem::remove(path);
 
   RecordTape tape;
-  Persistence persistence(tape, tape, PersistencePolicy{2});
-  if (!open(tape, persistence, path) || !publish(tape, 0)) return false;
-
+  Persistence persistence(tape, tape.GetFrontier(), PersistencePolicy{2});
   auto& persistence_slider = persistence;
   NoOpModule no_op;
-  Slider no_op_slider(tape, persistence_slider, no_op);
+  Slider no_op_slider(tape, persistence_slider.GetFrontier(), no_op);
+  tape.SetTailRef(no_op_slider.GetFrontier());
+  if (tape.open({wal_config.payload_size, wal_config.capacity,
+                 wal_config.alignment}) != RecordTapeOpenStatus::Ok ||
+      !persistence.open(path, physical_config).ok()) {
+    return false;
+  }
+  if (!publish(tape, 0)) return false;
 
   detail::PhysicalWalFileTestControl initial_control{};
   {
     PhysicalControlGuard guard(initial_control);
-    if (!persistence_slider.process_available().ok()) return false;
+    if (persistence_slider.process() != SliderStatus::Processed) return false;
   }
-  if (persistence_slider.GetFrontier() != 1 || !publish(tape, 1) || !publish(tape, 2)) {
+  if (read_frontier(persistence_slider.GetFrontier()) != 1 ||
+      !publish(tape, 1) || !publish(tape, 2)) {
     return false;
   }
 
   detail::PhysicalWalFileTestControl failure_control{};
   failure_control.fail_sync_call = 0;
-  SliderResult failed{};
+  SliderStatus failed = SliderStatus::Empty;
   {
     PhysicalControlGuard guard(failure_control);
-    failed = persistence_slider.process_available();
+    failed = persistence_slider.process();
   }
-  if (failed.status != SliderStatus::ModuleFailed ||
-      failed.processed_count != 2 || persistence_slider.GetFrontier() != 1 ||
+  if (failed != SliderStatus::ModuleFailed ||
+      read_frontier(persistence_slider.GetFrontier()) != 1 ||
       !persistence.failed() || failure_control.append_calls != 2 ||
       failure_control.sync_calls != 1) {
     return false;
   }
 
-  const SliderResult drained = no_op_slider.process_available();
-  const SliderResult hidden = no_op_slider.process_available();
-  const bool valid = drained.ok() && drained.processed_count == 1 &&
-                     hidden.status == SliderStatus::Empty &&
-                     no_op_slider.GetFrontier() == 1 &&
-                     tape.reclaim(no_op_slider.GetFrontier()) ==
-                         ReclaimStatus::Ok &&
+  const std::uint32_t append_calls = failure_control.append_calls;
+  const std::uint32_t sync_calls = failure_control.sync_calls;
+  if (persistence_slider.process() != SliderStatus::ModuleFailed ||
+      failure_control.append_calls != append_calls ||
+      failure_control.sync_calls != sync_calls) {
+    return false;
+  }
+
+  const SliderStatus drained = no_op_slider.process();
+  const SliderStatus hidden = no_op_slider.process();
+  const bool valid = drained == SliderStatus::Processed &&
+                     hidden == SliderStatus::Empty &&
+                     read_frontier(no_op_slider.GetFrontier()) == 1 &&
                      tape.tail() == 1 && tape.head() == 3;
   (void)persistence.close();
   tape.close();
@@ -340,31 +393,99 @@ template <class Predecessor>
   return valid;
 }
 
-[[nodiscard]] bool obeys_supplied_predecessor_frontier() {
-  const auto path = test_path("fexma_wal_persistence_predecessor.wal");
+[[nodiscard]] bool obeys_supplied_upstream_frontier() {
+  const auto path = test_path("fexma_wal_persistence_upstream.wal");
   std::filesystem::remove(path);
 
   RecordTape tape;
-  Position permitted_end = 2;
-  const TestPredecessor predecessor(permitted_end);
-  Persistence persistence(tape, predecessor, PersistencePolicy{8});
+  Frontier upstream{2};
+  Persistence persistence(tape, upstream, PersistencePolicy{8});
   if (!open(tape, persistence, path)) return false;
   for (std::uint64_t value = 0; value < 5; ++value) {
     if (!publish(tape, value)) return false;
   }
 
-  const SliderResult first = persistence.process_available();
-  if (tape.head() != 5 || first.status != SliderStatus::Processed ||
-      first.processed_count != 2 || persistence.GetFrontier() != 2) {
+  const SliderStatus first = persistence.process();
+  if (tape.head() != 5 || first != SliderStatus::Processed ||
+      read_frontier(persistence.GetFrontier()) != 2) {
     return false;
   }
 
-  permitted_end = 5;
-  const SliderResult second = persistence.process_available();
-  const bool valid = second.status == SliderStatus::Processed &&
-                     second.processed_count == 3 &&
-                     persistence.GetFrontier() == 5;
+  upstream.store(5, std::memory_order_release);
+  const SliderStatus second = persistence.process();
+  const bool valid = second == SliderStatus::Processed &&
+                     read_frontier(persistence.GetFrontier()) == 5;
   (void)persistence.close();
+  tape.close();
+  std::filesystem::remove(path);
+  return valid;
+}
+
+[[nodiscard]] bool failed_create_rolls_back_and_retry_succeeds() {
+  const auto path = test_path("fexma_wal_failed_create_rollback.wal");
+  std::filesystem::remove(path);
+
+  RecordTape tape;
+  Persistence persistence(tape, tape.GetFrontier());
+  tape.SetTailRef(persistence.GetFrontier());
+  if (tape.open({wal_config.payload_size, wal_config.capacity,
+                 wal_config.alignment}) != RecordTapeOpenStatus::Ok) {
+    return false;
+  }
+
+  detail::PhysicalWalFileTestControl control{};
+  control.fail_sync_call = 0;
+  OpenResult failed{};
+  {
+    PhysicalControlGuard guard(control);
+    failed = persistence.open(path, physical_config);
+  }
+  if (failed.status != OpenStatus::IoError || persistence.is_open() ||
+      std::filesystem::exists(path)) {
+    tape.close();
+    std::filesystem::remove(path);
+    return false;
+  }
+
+  const OpenResult retry = persistence.open(path, physical_config);
+  const bool valid = retry.ok() && persistence.is_open() &&
+                     std::filesystem::exists(path);
+  (void)persistence.close();
+  tape.close();
+  std::filesystem::remove(path);
+  return valid;
+}
+
+[[nodiscard]] bool preexisting_file_survives_file_exists() {
+  const auto path = test_path("fexma_wal_preexisting_file.wal");
+  std::filesystem::remove(path);
+  const std::array<char, 4> expected{'r', 'c', '1', '!'};
+  {
+    std::ofstream output(path, std::ios::binary);
+    output.write(expected.data(),
+                 static_cast<std::streamsize>(expected.size()));
+  }
+  const auto size_before = std::filesystem::file_size(path);
+
+  RecordTape tape;
+  Persistence persistence(tape, tape.GetFrontier());
+  tape.SetTailRef(persistence.GetFrontier());
+  if (tape.open({wal_config.payload_size, wal_config.capacity,
+                 wal_config.alignment}) != RecordTapeOpenStatus::Ok) {
+    std::filesystem::remove(path);
+    return false;
+  }
+  const OpenResult result = persistence.open(path, physical_config);
+
+  std::array<char, 4> actual{};
+  {
+    std::ifstream input(path, std::ios::binary);
+    input.read(actual.data(), static_cast<std::streamsize>(actual.size()));
+  }
+  const bool valid = result.status == OpenStatus::FileAlreadyExists &&
+                     !persistence.is_open() &&
+                     std::filesystem::file_size(path) == size_before &&
+                     actual == expected;
   tape.close();
   std::filesystem::remove(path);
   return valid;
@@ -376,14 +497,14 @@ int main() {
   if (!strict_default_policy_processes_one(PersistencePolicy{},
                                            "fexma_wal_persistence_default.wal"))
     return 1;
-  if (!strict_default_policy_processes_one(
-          PersistencePolicy{0}, "fexma_wal_persistence_zero.wal"))
-    return 2;
   if (!sync_policy_eight_drains_twenty_three()) return 3;
-  if (!obeys_supplied_predecessor_frontier()) return 4;
+  if (!obeys_supplied_upstream_frontier()) return 4;
   if (!batches_sync_then_release_downstream()) return 5;
   if (!append_failure_does_not_publish()) return 6;
-  if (!sync_failure_hides_batch_but_durable_prefix_drains()) return 7;
-  if (!tape_and_persistence_have_independent_lifecycles()) return 8;
+  if (!sticky_failure_precedes_empty_result()) return 7;
+  if (!sync_failure_hides_batch_but_durable_prefix_drains()) return 8;
+  if (!tape_and_persistence_have_independent_lifecycles()) return 9;
+  if (!failed_create_rolls_back_and_retry_succeeds()) return 10;
+  if (!preexisting_file_survives_file_exists()) return 11;
   return 0;
 }
