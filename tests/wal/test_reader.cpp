@@ -40,6 +40,7 @@ payload(std::uint64_t value) noexcept {
   RecordTape tape;
   Persistence persistence(tape, tape.GetFrontier(),
                           PersistencePolicy{records == 0 ? 1u : records});
+  tape.SetTailRef(persistence.GetFrontier());
   if (!tape.open({config.payload_size, records == 0 ? 1u : records,
                   config.alignment})
            .ok()) {

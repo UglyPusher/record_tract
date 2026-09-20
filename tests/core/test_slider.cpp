@@ -72,8 +72,12 @@ bool open_tape(RecordTape& tape) { return tape.open({sizeof(Payload), 4, default
 bool publish(RecordTape& tape, std::uint64_t value) { const Payload bytes=payload(value); return tape.try_publish(std::span<const std::byte>{bytes}).ok(); }
 
 bool processes_available_range_in_order() {
-  RecordTape tape; if (!open_tape(tape)||!publish(tape,1)||!publish(tape,2)||!publish(tape,3)) return false;
-  RecordingModule module; Slider slider(tape,tape.GetFrontier(),module); const SliderResult result=slider.process_available();
+  RecordTape tape;
+  RecordingModule module;
+  Slider slider(tape, tape.GetFrontier(), module);
+  tape.SetTailRef(slider.GetFrontier());
+  if (!open_tape(tape)||!publish(tape,1)||!publish(tape,2)||!publish(tape,3)) return false;
+  const SliderResult result=slider.process_available();
   if(result.status!=SliderStatus::Processed||result.processed_count!=3||result.current!=3||read_frontier(slider.GetFrontier())!=3||module.count()!=3) return false;
   for(Position p=0;p<3;++p) if(module.position(static_cast<std::size_t>(p))!=p) return false;
   return slider.process_available().status==SliderStatus::Empty;
@@ -81,15 +85,15 @@ bool processes_available_range_in_order() {
 
 bool chained_sliders_use_explicit_frontiers() {
   RecordTape tape;
-  if (!open_tape(tape) || !publish(tape, 1) || !publish(tape, 2) ||
-      !publish(tape, 3)) {
-    return false;
-  }
-
   RecordingModule first_module;
   RecordingModule second_module;
   Slider first(tape, tape.GetFrontier(), first_module);
   Slider second(tape, first.GetFrontier(), second_module);
+  tape.SetTailRef(second.GetFrontier());
+  if (!open_tape(tape) || !publish(tape, 1) || !publish(tape, 2) ||
+      !publish(tape, 3)) {
+    return false;
+  }
   const SliderResult first_result = first.process_available();
   const SliderResult second_result = second.process_available();
   return first_result.status == SliderStatus::Processed &&
@@ -101,41 +105,52 @@ bool chained_sliders_use_explicit_frontiers() {
 }
 
 bool respects_upstream_and_retries_module_failure() {
-  RecordTape tape; if(!open_tape(tape)||!publish(tape,1)||!publish(tape,2)||!publish(tape,3)) return false;
+  RecordTape tape;
   Frontier upstream{2}; RecordingModule module(1); Slider slider(tape,upstream,module);
+  tape.SetTailRef(slider.GetFrontier());
+  if(!open_tape(tape)||!publish(tape,1)||!publish(tape,2)||!publish(tape,3)) return false;
   const SliderResult failed=slider.process_available(); if(failed.status!=SliderStatus::ModuleFailed||failed.processed_count!=1||read_frontier(slider.GetFrontier())!=1||module.count()!=1) return false;
   module.allow_all(); const SliderResult retried=slider.process_available(); if(retried.status!=SliderStatus::Processed||retried.processed_count!=1||retried.current!=2||read_frontier(slider.GetFrontier())!=2) return false;
   upstream.store(3, std::memory_order_release); const SliderResult last=slider.process_available(); return last.status==SliderStatus::Processed&&last.processed_count==1&&last.current==3&&read_frontier(slider.GetFrontier())==3;
 }
 
 bool rejects_regressed_upstream() {
-  RecordTape tape; if(!open_tape(tape)||!publish(tape,1)) return false;
-  Frontier upstream{}; RecordingModule module; Slider slider(tape,upstream,module); slider.reset_quiescent(1);
+  RecordTape tape;
+  Frontier upstream{}; RecordingModule module; Slider slider(tape,upstream,module);
+  tape.SetTailRef(slider.GetFrontier());
+  if(!open_tape(tape)||!publish(tape,1)) return false;
+  slider.reset_quiescent(1);
   return slider.process_available().status==SliderStatus::UpstreamRegression&&module.count()==0&&read_frontier(slider.GetFrontier())==1;
 }
 
 bool reports_unavailable_views_without_publication() {
-  RecordTape tape; if(!open_tape(tape)||!publish(tape,1)) return false;
-  Frontier upstream{1}; RecordingModule module; Slider reclaimed(tape,upstream,module); if(tape.reclaim(1)!=ReclaimStatus::Ok) return false;
+  Frontier terminal{};
+  RecordTape tape;
+  tape.SetTailRef(terminal);
+  Frontier upstream{1}; RecordingModule module; Slider reclaimed(tape,upstream,module);
+  if(!open_tape(tape)||!publish(tape,1)) return false;
+  terminal.store(1, std::memory_order_release);
   const SliderResult rr=reclaimed.process_available(); if(rr.status!=SliderStatus::ViewUnavailable||rr.view_status!=ViewStatus::Reclaimed||rr.processed_count!=0||read_frontier(reclaimed.GetFrontier())!=0) return false;
-  RecordTape second; if(!open_tape(second)) return false; Frontier ahead{1}; RecordingModule second_module; Slider unpublished(second,ahead,second_module); const SliderResult ur=unpublished.process_available();
+  RecordTape second; Frontier second_terminal{}; second.SetTailRef(second_terminal); if(!open_tape(second)) return false; Frontier ahead{1}; RecordingModule second_module; Slider unpublished(second,ahead,second_module); const SliderResult ur=unpublished.process_available();
   return ur.status==SliderStatus::ViewUnavailable&&ur.view_status==ViewStatus::Unpublished&&read_frontier(unpublished.GetFrontier())==0&&second_module.count()==0;
 }
 
 bool execution_policy_preserves_default_and_supports_batches() {
   RecordTape tape;
-  if (!open_tape(tape) || !publish(tape, 1) || !publish(tape, 2) ||
-      !publish(tape, 3)) return false;
   RecordingModule explicit_default;
   Slider default_slider(tape, tape.GetFrontier(), explicit_default, ExecutionPolicy{1, 1});
+  tape.SetTailRef(default_slider.GetFrontier());
+  if (!open_tape(tape) || !publish(tape, 1) || !publish(tape, 2) ||
+      !publish(tape, 3)) return false;
   if (default_slider.process_available().processed_count != 3 ||
       read_frontier(default_slider.GetFrontier()) != 3) return false;
 
   RecordTape batched_tape;
-  if (!open_tape(batched_tape) || !publish(batched_tape, 1) ||
-      !publish(batched_tape, 2) || !publish(batched_tape, 3)) return false;
   RecordingModule batched(2);
   Slider batched_slider(batched_tape, batched_tape.GetFrontier(), batched, ExecutionPolicy{2, 2});
+  batched_tape.SetTailRef(batched_slider.GetFrontier());
+  if (!open_tape(batched_tape) || !publish(batched_tape, 1) ||
+      !publish(batched_tape, 2) || !publish(batched_tape, 3)) return false;
   const SliderResult first = batched_slider.process_available();
   return first.status == SliderStatus::ModuleFailed &&
          first.processed_count == 2 && read_frontier(batched_slider.GetFrontier()) == 2;
@@ -143,13 +158,14 @@ bool execution_policy_preserves_default_and_supports_batches() {
 
 bool execution_policy_read_count_does_not_limit_one_call() {
   RecordTape tape;
+  RecordingModule module;
+  Slider slider(tape, tape.GetFrontier(), module, ExecutionPolicy{2, 4});
+  tape.SetTailRef(slider.GetFrontier());
   if (!tape.open({sizeof(Payload), 8, default_alignment}).ok()) return false;
   for (std::uint64_t value = 0; value < 5; ++value) {
     if (!publish(tape, value)) return false;
   }
 
-  RecordingModule module;
-  Slider slider(tape, tape.GetFrontier(), module, ExecutionPolicy{2, 4});
   const SliderResult result = slider.process_available();
   if (result.status != SliderStatus::Processed ||
       result.processed_count != 5 || result.current != 5 ||
@@ -166,14 +182,15 @@ bool execution_policy_read_count_does_not_limit_one_call() {
 
 bool execution_policy_publishes_cadence_and_partial_progress() {
   RecordTape tape;
+  FrontierObservingModule module;
+  Slider slider(tape, tape.GetFrontier(), module, ExecutionPolicy{3, 2});
+  tape.SetTailRef(slider.GetFrontier());
   if (!tape.open({sizeof(Payload), 8, default_alignment}).ok() ||
       !publish(tape, 1) || !publish(tape, 2) ||
       !publish(tape, 3) || !publish(tape, 4) || !publish(tape, 5)) {
     return false;
   }
 
-  FrontierObservingModule module;
-  Slider slider(tape, tape.GetFrontier(), module, ExecutionPolicy{3, 2});
   module.observe(slider);
   const SliderResult result = slider.process_available();
   constexpr std::array<Position, 5> expected_frontiers{0, 0, 2, 2, 4};
@@ -193,13 +210,14 @@ bool execution_policy_publishes_cadence_and_partial_progress() {
 
 bool execution_policy_flushes_residual_before_failure() {
   RecordTape tape;
+  RecordingModule module(3);
+  Slider slider(tape, tape.GetFrontier(), module, ExecutionPolicy{8, 4});
+  tape.SetTailRef(slider.GetFrontier());
   if (!tape.open({sizeof(Payload), 8, default_alignment}).ok()) return false;
   for (std::uint64_t value = 0; value < 5; ++value) {
     if (!publish(tape, value)) return false;
   }
 
-  RecordingModule module(3);
-  Slider slider(tape, tape.GetFrontier(), module, ExecutionPolicy{8, 4});
   const SliderResult failed = slider.process_available();
   if (failed.status != SliderStatus::ModuleFailed ||
       failed.processed_count != 3 || failed.current != 3 ||
@@ -216,13 +234,14 @@ bool execution_policy_flushes_residual_before_failure() {
 
 bool policy_observes_canonical_publication(ExecutionPolicy policy) {
   RecordTape tape;
+  FrontierObservingModule module;
+  Slider slider(tape, tape.GetFrontier(), module, policy);
+  tape.SetTailRef(slider.GetFrontier());
   if (!open_tape(tape) || !publish(tape, 1) || !publish(tape, 2) ||
       !publish(tape, 3)) {
     return false;
   }
 
-  FrontierObservingModule module;
-  Slider slider(tape, tape.GetFrontier(), module, policy);
   module.observe(slider);
   const SliderResult result = slider.process_available();
   constexpr std::array<Position, 3> expected_frontiers{0, 1, 2};

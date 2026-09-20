@@ -35,12 +35,6 @@ struct RecordTapeOpenResult {
   }
 };
 
-enum class ReclaimStatus : std::uint8_t {
-  Ok,
-  Closed,
-  InvalidPosition
-};
-
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4324) // Intentional cache-line boundary isolation.
@@ -48,7 +42,7 @@ enum class ReclaimStatus : std::uint8_t {
 
 class RecordTape final {
 public:
-  RecordTape() = default;
+  RecordTape() noexcept;
   ~RecordTape();
 
   RecordTape(const RecordTape&) = delete;
@@ -62,11 +56,10 @@ public:
   try_publish(std::span<const std::byte> payload) noexcept;
   [[nodiscard]] AccessResult try_view(Position position) const noexcept;
 
-  // end is exclusive. The composition must ensure all mandatory readers have
-  // finished every position below end before the sole reclaimer calls this.
-  [[nodiscard]] ReclaimStatus reclaim(Position end) noexcept;
+  // Cold-path topology wiring. The terminal frontier must outlive the tape.
+  void SetTailRef(const Frontier& frontier) noexcept;
 
-  // Cold-path lifecycle: producer, reclaimer, and view users must be stopped.
+  // Cold-path lifecycle: producer, terminal stage, and view users must be stopped.
   void close() noexcept;
 
   [[nodiscard]] bool is_open() const noexcept;
@@ -115,9 +108,9 @@ private:
   };
 
   // Each boundary is a complete cache line; adjacent members therefore have
-  // distinct cache-line storage and cannot share the producer/reclaimer line.
-  TapeBoundary tail_boundary_{};
+  // distinct cache-line storage.
   TapeBoundary head_boundary_{};
+  const Frontier* tail_frontier_;
   std::uint32_t head_slot_{};
   Storage storage_{};
   RecordTapeConfig config_{};

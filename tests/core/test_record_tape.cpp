@@ -47,22 +47,37 @@ using Payload = std::array<std::byte, 16>;
   tape.close();
   return no_file && !tape.is_open() &&
          tape.try_publish(payload(0)).status == PublishStatus::Closed &&
-         tape.try_view(0).status == ViewStatus::Closed &&
-         tape.reclaim(0) == ReclaimStatus::Closed;
+         tape.try_view(0).status == ViewStatus::Closed;
 }
 
-[[nodiscard]] bool reclaims_only_valid_absolute_ranges() {
+[[nodiscard]] bool defaults_to_head_as_terminal_frontier() {
   RecordTape tape;
+  if (!tape.open({16, 1, 64}).ok() || !tape.try_publish(payload(0)).ok() ||
+      tape.tail() != tape.head() ||
+      tape.try_view(0).status != ViewStatus::Reclaimed ||
+      !tape.try_publish(payload(1)).ok()) {
+    return false;
+  }
+  tape.close();
+  return true;
+}
+
+[[nodiscard]] bool follows_terminal_frontier_for_reuse() {
+  Frontier terminal{};
+  RecordTape tape;
+  tape.SetTailRef(terminal);
   if (!tape.open({16, 3, 64}).ok()) return false;
 
   for (Position position = 0; position < 3; ++position) {
     const PublishResult published = tape.try_publish(payload(position));
     if (!published.ok() || published.position != position) return false;
   }
-  if (tape.try_publish(payload(3)).status != PublishStatus::Full ||
-      tape.reclaim(4) != ReclaimStatus::InvalidPosition ||
-      tape.reclaim(2) != ReclaimStatus::Ok || tape.tail() != 2 ||
-      tape.reclaim(1) != ReclaimStatus::InvalidPosition ||
+  if (tape.try_publish(payload(3)).status != PublishStatus::Full) {
+    return false;
+  }
+
+  terminal.store(2, std::memory_order_release);
+  if (tape.tail() != 2 ||
       tape.try_view(1).status != ViewStatus::Reclaimed ||
       !tape.try_publish(payload(3)).ok() ||
       !tape.try_publish(payload(4)).ok()) {
@@ -79,16 +94,17 @@ using Payload = std::array<std::byte, 16>;
       if (access.record.payload[index] != payload(position)[index]) return false;
     }
   }
-  if (tape.reclaim(5) != ReclaimStatus::Ok || tape.tail() != tape.head()) {
-    return false;
-  }
+  terminal.store(5, std::memory_order_release);
+  if (tape.tail() != 5 || tape.tail() != tape.head()) return false;
   tape.close();
   return true;
 }
 
-[[nodiscard]] bool producer_and_reclaimer_wrap_concurrently() {
+[[nodiscard]] bool producer_and_terminal_frontier_wrap_concurrently() {
   constexpr Position count = 50'000;
+  Frontier terminal{};
   RecordTape tape;
+  tape.SetTailRef(terminal);
   if (!tape.open({16, 128, 64}).ok()) return false;
   std::atomic<bool> failed{false};
 
@@ -107,7 +123,7 @@ using Payload = std::array<std::byte, 16>;
     }
   });
 
-  std::thread reclaimer([&] {
+  std::thread terminal_stage([&] {
     for (Position position = 0; position < count;) {
       const AccessResult access = tape.try_view(position);
       if (access.status == ViewStatus::Unpublished) {
@@ -125,17 +141,13 @@ using Payload = std::array<std::byte, 16>;
           return;
         }
       }
-      // The borrowed view is no longer used after this statement.
-      if (tape.reclaim(position + 1) != ReclaimStatus::Ok) {
-        failed = true;
-        return;
-      }
+      terminal.store(position + 1, std::memory_order_release);
       ++position;
     }
   });
 
   producer.join();
-  reclaimer.join();
+  terminal_stage.join();
   const bool valid = !failed && tape.tail() == count && tape.head() == count;
   tape.close();
   return valid;
@@ -145,7 +157,8 @@ using Payload = std::array<std::byte, 16>;
 
 int main() {
   if (!opens_without_physical_storage()) return 1;
-  if (!reclaims_only_valid_absolute_ranges()) return 2;
-  if (!producer_and_reclaimer_wrap_concurrently()) return 3;
+  if (!defaults_to_head_as_terminal_frontier()) return 2;
+  if (!follows_terminal_frontier_for_reuse()) return 3;
+  if (!producer_and_terminal_frontier_wrap_concurrently()) return 4;
   return 0;
 }

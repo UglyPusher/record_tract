@@ -81,6 +81,7 @@ constexpr PhysicalWalConfig physical_config{
 [[nodiscard]] bool open(RecordTape& tape,
                         Persistence& persistence,
                         const std::filesystem::path& path) {
+  tape.SetTailRef(persistence.GetFrontier());
   return tape.open({wal_config.payload_size, wal_config.capacity,
                    wal_config.alignment})
              .ok() &&
@@ -108,8 +109,10 @@ constexpr PhysicalWalConfig physical_config{
     return false;
   }
 
-  // Runtime storage remains open and readable after persistence closes.
-  if (!tape.is_open() || !tape.try_view(2).ok()) return false;
+  // Runtime storage remains open after persistence closes, but its terminal
+  // frontier has reclaimed the records it processed.
+  if (!tape.is_open() ||
+      tape.try_view(2).status != ViewStatus::Reclaimed) return false;
   tape.close();
 
   WalReader reader;
@@ -135,13 +138,14 @@ constexpr PhysicalWalConfig physical_config{
   RecordTape tape;
   Persistence persistence(tape, tape.GetFrontier(), PersistencePolicy{2});
   if (!open(tape, persistence, path)) return false;
-  for (std::uint64_t value = 0; value < 5; ++value) {
-    if (!publish(tape, value)) return false;
-  }
 
   auto& persistence_slider = persistence;
   NoOpModule no_op;
   Slider no_op_slider(tape, persistence_slider.GetFrontier(), no_op);
+  tape.SetTailRef(no_op_slider.GetFrontier());
+  for (std::uint64_t value = 0; value < 5; ++value) {
+    if (!publish(tape, value)) return false;
+  }
 
   detail::PhysicalWalFileTestControl control{};
   PhysicalControlGuard guard(control);
@@ -152,7 +156,7 @@ constexpr PhysicalWalConfig physical_config{
       control.append_calls != 2 ||
       control.sync_calls != 1 || !no_op_slider.process_available().ok() ||
       read_frontier(no_op_slider.GetFrontier()) != 2 ||
-      tape.reclaim(read_frontier(no_op_slider.GetFrontier())) != ReclaimStatus::Ok) {
+      tape.tail() != 2) {
     return false;
   }
 
@@ -162,7 +166,7 @@ constexpr PhysicalWalConfig physical_config{
       control.append_calls != 4 ||
       control.sync_calls != 2 || !no_op_slider.process_available().ok() ||
       read_frontier(no_op_slider.GetFrontier()) != 4 ||
-      tape.reclaim(read_frontier(no_op_slider.GetFrontier())) != ReclaimStatus::Ok) {
+      tape.tail() != 4) {
     return false;
   }
 
@@ -174,7 +178,6 @@ constexpr PhysicalWalConfig physical_config{
       control.append_calls != 5 || control.sync_calls != 3 ||
       !no_op_slider.process_available().ok() ||
       read_frontier(no_op_slider.GetFrontier()) != 5 ||
-      tape.reclaim(read_frontier(no_op_slider.GetFrontier())) != ReclaimStatus::Ok ||
       tape.tail() != 5 || tape.head() != 5) {
     return false;
   }
@@ -235,6 +238,7 @@ constexpr PhysicalWalConfig physical_config{
   std::filesystem::remove(path);
   RecordTape tape;
   Persistence persistence(tape, tape.GetFrontier(), PersistencePolicy{8});
+  tape.SetTailRef(persistence.GetFrontier());
   if (!tape.open({wal_config.payload_size, 32, wal_config.alignment}).ok() ||
       !persistence.open(path, physical_config).ok()) {
     return false;
@@ -294,11 +298,13 @@ constexpr PhysicalWalConfig physical_config{
 
   RecordTape tape;
   Persistence persistence(tape, tape.GetFrontier(), PersistencePolicy{2});
-  if (!open(tape, persistence, path) || !publish(tape, 0)) return false;
+  if (!open(tape, persistence, path)) return false;
 
   auto& persistence_slider = persistence;
   NoOpModule no_op;
   Slider no_op_slider(tape, persistence_slider.GetFrontier(), no_op);
+  tape.SetTailRef(no_op_slider.GetFrontier());
+  if (!publish(tape, 0)) return false;
 
   detail::PhysicalWalFileTestControl initial_control{};
   {
@@ -330,8 +336,6 @@ constexpr PhysicalWalConfig physical_config{
   const bool valid = drained.ok() && drained.processed_count == 1 &&
                      hidden.status == SliderStatus::Empty &&
                      read_frontier(no_op_slider.GetFrontier()) == 1 &&
-                     tape.reclaim(read_frontier(no_op_slider.GetFrontier())) ==
-                         ReclaimStatus::Ok &&
                      tape.tail() == 1 && tape.head() == 3;
   (void)persistence.close();
   tape.close();

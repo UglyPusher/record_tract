@@ -42,12 +42,12 @@ private:
 
 int main() {
   core::RecordTape tape;
+  Module module;
+  core::Slider slider(tape, tape.GetFrontier(), module);
+  tape.SetTailRef(slider.GetFrontier());
   if (!tape.open({payload_size, capacity, core::default_alignment}).ok()) {
     return 1;
   }
-
-  Module module;
-  core::Slider slider(tape, tape.GetFrontier(), module);
 
   std::atomic<bool> failed{false};
   std::atomic<bool> producer_done{false};
@@ -83,12 +83,6 @@ int main() {
 
       const core::SliderResult result = slider.process_available();
       if (!result.ok()) {
-        failed.store(true, std::memory_order_release);
-        return;
-      }
-
-      if (result.status == core::SliderStatus::Processed &&
-          tape.reclaim(slider.current()) != core::ReclaimStatus::Ok) {
         failed.store(true, std::memory_order_release);
         return;
       }
