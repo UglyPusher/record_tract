@@ -1,3 +1,6 @@
+# Standalone consumer build for the basic demo. It fetches a pinned revision
+# from GitHub and links the application only against fexma::record_tract.
+
 cmake_minimum_required(VERSION 3.16)
 
 project(record_tract_basic_example LANGUAGES CXX)
@@ -25,8 +28,7 @@ if(NOT record_tract_source_POPULATED)
 endif()
 
 add_executable(example_basic_tract_from_github
-  main.cpp
-  demo.cpp
+  demo_app.cpp
 )
 
 target_compile_features(example_basic_tract_from_github PRIVATE cxx_std_20)

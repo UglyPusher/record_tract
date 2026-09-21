@@ -1,3 +1,12 @@
+/**
+ * @file demo_payload.hpp
+ * @brief Deterministic record format and hashing helpers for the basic demo.
+ *
+ * Every 16-byte payload stores its tape position and a derived value as two
+ * little-endian integers. The same representation is used to calculate the
+ * expected final hash during validation.
+ */
+
 #pragma once
 
 #include <fexma/record_tract/record_tape_types.hpp>

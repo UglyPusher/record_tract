@@ -95,8 +95,7 @@ fexma_apply_warnings(fexma_record_tract)
 fexma_apply_warnings(fexma_wal)
 
 add_executable(example_basic_tract
-  examples/basic_tract/main.cpp
-  examples/basic_tract/demo.cpp
+  examples/basic_tract/demo_app.cpp
 )
 target_link_libraries(example_basic_tract PRIVATE fexma::record_tract)
 fexma_apply_warnings(example_basic_tract)

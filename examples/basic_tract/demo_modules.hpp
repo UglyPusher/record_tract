@@ -1,3 +1,11 @@
+/**
+ * @file demo_modules.hpp
+ * @brief Processing stages used by the basic RecordTape demo.
+ *
+ * PayloadValidationModule verifies record order and payload contents before
+ * RollingHashModule folds the same ordered records into a deterministic hash.
+ */
+
 #pragma once
 
 #include "demo_payload.hpp"

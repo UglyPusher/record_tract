@@ -1,9 +1,12 @@
 /**
- * @file demo.cpp
- * @brief Three-thread RecordTape -> Slider -> Slider composition.
+ * @file demo_app.cpp
+ * @brief Three-thread RecordTape -> Slider -> Slider demo application.
+ *
+ * A producer publishes bounded records to the tape. The validation slider
+ * follows the tape Head, the hash slider follows the validation frontier,
+ * and the hash frontier serves as Tail so processed slots can be reclaimed.
+ * Each runtime role executes on its own thread.
  */
-
-#include "demo.hpp"
 
 #include "demo_modules.hpp"
 #include "demo_payload.hpp"
@@ -17,16 +20,17 @@
 #include <span>
 #include <thread>
 
-namespace basic_tract_demo {
-
 namespace {
+
+namespace core = fexma::record_tract;
+namespace demo = basic_tract_demo;
 
 constexpr std::uint32_t capacity = 64;
 constexpr core::Position record_count = 4096;
 constexpr core::ExecutionPolicy policy{8, 4};
 
-using ValidationSlider = core::Slider<PayloadValidationModule>;
-using HashSlider = core::Slider<RollingHashModule>;
+using ValidationSlider = core::Slider<demo::PayloadValidationModule>;
+using HashSlider = core::Slider<demo::RollingHashModule>;
 
 void run_producer(core::RecordTape& tape, std::atomic<bool>& failed,
                   std::atomic<bool>& producer_done);
@@ -36,18 +40,19 @@ void run_hash_stage(HashSlider& slider, std::atomic<bool>& failed);
 
 } // namespace
 
-int run_demo() {
+int main() {
   core::RecordTape tape;
-  PayloadValidationModule module_a;
-  RollingHashModule module_b;
+  demo::PayloadValidationModule validation;
+  demo::RollingHashModule hashing;
 
-  core::Slider slider_a(tape, tape.GetFrontier(), module_a, policy);
-  core::Slider slider_b(tape, slider_a.GetFrontier(), module_b, policy);
+  core::Slider validation_slider(tape, tape.GetFrontier(), validation, policy);
+  core::Slider hash_slider(tape, validation_slider.GetFrontier(), hashing,
+                           policy);
 
   // The last completed frontier is the boundary for reclaiming tape slots.
-  tape.SetTailRef(slider_b.GetFrontier());
+  tape.SetTailRef(hash_slider.GetFrontier());
 
-  if (tape.open({payload_size, capacity, core::default_alignment}) !=
+  if (tape.open({demo::payload_size, capacity, core::default_alignment}) !=
       core::RecordTapeOpenStatus::Ok) {
     return 1;
   }
@@ -57,22 +62,23 @@ int run_demo() {
 
   std::thread producer(run_producer, std::ref(tape), std::ref(failed),
                        std::ref(producer_done));
-  std::thread stage_a(run_validation_stage, std::ref(slider_a),
-                      std::ref(failed));
-  std::thread stage_b(run_hash_stage, std::ref(slider_b), std::ref(failed));
+  std::thread validation_stage(run_validation_stage,
+                               std::ref(validation_slider), std::ref(failed));
+  std::thread hash_stage(run_hash_stage, std::ref(hash_slider),
+                         std::ref(failed));
 
   producer.join();
-  stage_a.join();
-  stage_b.join();
+  validation_stage.join();
+  hash_stage.join();
 
   const bool valid =
       !failed.load(std::memory_order_acquire) &&
       producer_done.load(std::memory_order_acquire) &&
-      module_a.processed() == record_count &&
-      module_b.processed() == record_count &&
-      module_b.value() == expected_hash(record_count) &&
-      slider_a.current() == record_count &&
-      slider_b.current() == record_count && tape.head() == record_count &&
+      validation.processed() == record_count &&
+      hashing.processed() == record_count &&
+      hashing.value() == demo::expected_hash(record_count) &&
+      validation_slider.current() == record_count &&
+      hash_slider.current() == record_count && tape.head() == record_count &&
       tape.tail() == record_count;
 
   tape.close();
@@ -86,7 +92,7 @@ void run_producer(core::RecordTape& tape, std::atomic<bool>& failed,
   for (core::Position position = 0; position < record_count;) {
     if (failed.load(std::memory_order_acquire)) return;
 
-    const Payload payload = make_payload(position);
+    const demo::Payload payload = demo::make_payload(position);
     const core::PublishResult result =
         tape.try_publish(std::span<const std::byte>{payload});
 
@@ -129,7 +135,7 @@ void run_hash_stage(HashSlider& slider, std::atomic<bool>& failed) {
     const core::SliderStatus status = slider.process();
     if (status == core::SliderStatus::Processed) continue;
     if (status == core::SliderStatus::Empty) {
-      // Slider A has not released another record for this stage yet.
+      // The validation slider has not released another record yet.
       std::this_thread::yield();
       continue;
     }
@@ -139,5 +145,3 @@ void run_hash_stage(HashSlider& slider, std::atomic<bool>& failed) {
 }
 
 } // namespace
-
-} // namespace basic_tract_demo
