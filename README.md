@@ -1,135 +1,112 @@
 # record_tract
 
-`record_tract` is a small C++20 library for building bounded, ordered, low-overhead record-processing pipelines.
+`record_tract` is a small C++20 library for building bounded, ordered record-processing pipelines over preallocated storage.
 
-The Core consists of two mechanics:
+It is intended for systems where:
 
-* `RecordTape` — a preallocated bounded ring of immutable records;
-* `Slider<Module>` — an ordered processing stage with its own progress frontier.
+* one producer publishes an ordered sequence of records;
+* records pass through a fixed linear sequence of processing stages;
+* stages may run at different rates and on different threads;
+* records should remain in one shared storage instead of being copied between stage queues;
+* memory use must remain bounded;
+* a slow downstream stage must naturally apply backpressure to the producer;
+* progress through every stage must be explicitly observable.
 
-Stages are composed into a static linear tract:
+A typical tract looks like this:
 
-```text
+```text id="11phwq"
 Producer
    |
    v
-Head Frontier
+RecordTape / Head
    |
    v
-Slider A
+Stage A
    |
    v
 Frontier A
    |
    v
-Slider B
+Stage B
    |
    v
-Frontier B
-   |
-   v
-Tail
+Frontier B / Tail
 ```
 
-The terminal frontier is the tape reclamation boundary.
+`record_tract` provides the storage and progress mechanics for this model. The application provides the processing logic and decides where and how stages execute.
 
-There is no separate Tail progress state.
+## Core Model
 
-## Why
+The Core is built around three concepts:
 
-The library is intended for pipelines where the data path should remain small and explicit:
+### RecordTape
 
-```text
-preallocated storage
-+ immutable records
-+ monotonic frontiers
-+ ordered processing
+`RecordTape` is a bounded, preallocated storage for records.
+
+The producer publishes records into the Tape in monotonically increasing `Position` order. Physical slots are reused, but logical positions continue to increase.
+
+### Frontier
+
+A `Frontier` is a monotonically increasing progress boundary.
+
+All Core boundaries use the same exclusive semantics:
+
+```text id="7cf6d3"
+Head     = N  -> positions < N have been published
+Frontier = N  -> positions < N have been completed by its owner
+Tail     = N  -> positions < N are no longer retained by the tract
 ```
 
-`record_tract` provides these mechanics without owning the runtime around them.
+The producer publishes Head.
 
-Core does **not** provide:
+Each processing stage publishes its own Frontier.
 
-* worker threads;
-* executors;
-* schedulers;
-* wait strategies;
-* dynamic topology;
-* queues between stages;
-* persistence;
-* domain semantics.
+The Frontier of the final stage is observed by `RecordTape` as Tail and controls when physical Tape slots may be reused.
 
-The application decides where and how stages execute.
+### Stage
 
-## Core model
+A stage processes records from `RecordTape` up to an upstream Frontier and publishes its own Frontier after completing them.
 
-A `RecordTape` owns a fixed-capacity preallocated ring.
+Core provides `Slider<Module>` as the standard implementation of a sequential stage.
 
-Records are addressed by absolute monotonic `Position` values rather than by physical ring slots.
+The `Module` defines what processing means:
 
-The producer publishes the Head frontier:
-
-```text
-Head = exclusive end of published records
+```cpp id="bq1wcs"
+bool process(const RecordView& record) noexcept;
 ```
 
-Every Slider owns another frontier:
+The `Slider` provides the mechanics of ordered traversal and Frontier publication.
 
-```text
-Frontier N = all positions < N are complete for this stage
-```
+Using `Slider<Module>` is not mandatory. Applications may implement their own stage mechanics directly using `RecordTape` and `Frontier`.
 
-A published stage frontier also certifies that the stage no longer retains views or references to those positions.
+## Minimal Example
 
-The terminal stage frontier is observed directly by `RecordTape` as Tail:
-
-```text
-Tail = terminal Frontier
-```
-
-Therefore:
-
-```text
-tail <= ... <= stage frontier <= ... <= head
-
-head - tail <= capacity
-```
-
-When no stages exist, the tape observes its own Head as Tail:
-
-```text
-Tail == Head
-```
-
-## Minimal example
-
-```cpp
+```cpp id="m3jd0g"
 #include <fexma/record_tract/record_tape.hpp>
 #include <fexma/record_tract/slider.hpp>
 
 namespace rt = fexma::record_tract;
 
-class Module final {
+class ValidationModule final {
 public:
     bool process(const rt::RecordView& record) noexcept {
-        // Complete processing of this record.
+        // Process one record.
         return true;
     }
 };
 
 int main() {
     rt::RecordTape tape;
-    Module module;
+    ValidationModule validation;
 
-    rt::Slider slider{
+    rt::Slider validation_slider{
         tape,
         tape.GetFrontier(),
-        module
+        validation
     };
 
-    // The terminal Slider frontier becomes Tail.
-    // Topology must be wired before open().
-    tape.SetTailRef(slider.GetFrontier());
+    // The final stage Frontier becomes Tail.
+    tape.SetTailRef(validation_slider.GetFrontier());
 
     if (tape.open({
             .payload_size = 64,
@@ -145,445 +122,209 @@ int main() {
 
     // Stage executor:
     //
-    // switch (slider.process()) {
-    // case rt::SliderStatus::Processed:
-    // case rt::SliderStatus::Empty:
-    //     break;
-    // case rt::SliderStatus::ModuleFailed:
-    //     // Domain/runtime failure.
-    //     break;
-    // }
+    // rt::SliderStatus status = validation_slider.process();
 
     tape.close();
 }
 ```
 
-A complete concurrent example is available in:
+For the first Slider:
 
-```text
-examples/basic_tract/main.cpp
+```text id="8lzn5a"
+upstream Frontier = RecordTape Head
 ```
 
-See [doc/HOW_TO_USE.md](doc/HOW_TO_USE.md) for a practical walkthrough.
+A second stage uses the first stage's Frontier:
 
-## Building a tract
-
-A Slider receives its upstream frontier explicitly.
-
-It does not retain or depend on an upstream stage object.
-
-```cpp
-ModuleA module_a;
-ModuleB module_b;
-
-rt::Slider a{
+```cpp id="w9x3gk"
+rt::Slider hash_slider{
     tape,
-    tape.GetFrontier(),
-    module_a
+    validation_slider.GetFrontier(),
+    hashing
 };
-
-rt::Slider b{
-    tape,
-    a.GetFrontier(),
-    module_b
-};
-
-tape.SetTailRef(b.GetFrontier());
 ```
 
-This creates:
+The resulting tract is:
 
-```text
+```text id="i4v8nb"
 Head
-  |
-  v
-Slider A
-  |
-  v
-Frontier A
-  |
-  v
-Slider B
-  |
-  v
-Frontier B == Tail
+ |
+ v
+Validation Slider
+ |
+ v
+Validation Frontier
+ |
+ v
+Hash Slider
+ |
+ v
+Hash Frontier / Tail
 ```
 
-The tape is the record source.
-
-The upstream frontier is the processing permission boundary.
-
-These responsibilities are independent:
-
-```text
-RecordTape      -> where the record lives
-Frontier        -> how far this dependency has completed
-Slider          -> ordered processing mechanics
-Module          -> what processing means
-```
-
-## Frontier
-
-A public Core frontier is:
-
-```cpp
-using Frontier = std::atomic<Position>;
-```
-
-A frontier is an exclusive monotonic progress boundary.
-
-If its value is `N`, its owner certifies:
-
-```text
-all positions < N are complete
-```
-
-and that it retains no borrowed record views below `N`.
-
-Frontiers form the synchronization edges of the tract.
-
-The producer release-publishes Head after filling a record.
-
-A stage acquire-loads its upstream frontier before processing records and release-publishes its own frontier after completing them.
-
-The producer acquire-loads the terminal frontier before reusing ring capacity.
-
-The runtime path does not require `seq_cst`.
-
-## Slider
-
-`Slider<Module>` provides synchronous ordered stage mechanics.
-
-Its essential operation is:
-
-```cpp
-rt::SliderStatus status = slider.process();
-```
-
-The Slider processes:
-
-```text
-[current frontier, observed upstream frontier)
-```
-
-in absolute position order.
-
-Possible runtime outcomes are:
-
-```cpp
-SliderStatus::Processed
-SliderStatus::Empty
-SliderStatus::ModuleFailed
-```
-
-`Processed` means progress was completed and published.
-
-`Empty` means the acquired upstream frontier contained no new positions.
-
-`ModuleFailed` means the module explicitly returned failure.
-
-Broken tract invariants are programmer/composition errors and fail fast rather than becoming ordinary runtime statuses.
-
-## Module
-
-A module provides the domain operation:
-
-```cpp
-bool process(const rt::RecordView&) noexcept;
-```
-
-Returning `true` certifies successful completion of that position.
-
-Returning `false` produces `SliderStatus::ModuleFailed`.
-
-A Slider never publishes a failed position.
-
-A successfully completed prefix before the failed position is published before `process()` returns.
-
-Core does not interpret record payloads or module semantics.
-
-## Execution policy
-
-A Slider may be configured with:
-
-```cpp
-rt::ExecutionPolicy{
-    .read_count = 32,
-    .publish_count = 8
-};
-```
-
-Both values must be greater than zero.
-
-`read_count` partitions traversal into internal passes.
-
-`publish_count` controls how many successfully processed records may accumulate between frontier publications.
-
-The final successful residual prefix is always published before return.
-
-Execution policy changes processing mechanics, not ordering semantics.
-
-## Bounded storage and backpressure
+## Bounded Storage and Backpressure
 
 `RecordTape` has fixed capacity.
 
-For a valid tract:
+The producer may publish only while reusable Tape slots are available.
 
-```text
-head - tail <= capacity
-```
+If downstream processing falls behind, Tail stops advancing. When all available capacity is retained, `try_publish()` returns:
 
-When:
-
-```text
-head - tail == capacity
-```
-
-the producer receives:
-
-```cpp
+```cpp id="cjg7z1"
 PublishStatus::Full
 ```
 
-This is normal bounded backpressure.
+This is normal bounded backpressure, not an error.
 
-No record can be overwritten until the terminal frontier has passed its absolute position.
+Advancing the terminal Frontier makes old Tape slots reusable. There is no separate reclaim operation.
 
-There is no explicit reclaim operation: advancement of the terminal frontier makes capacity reclaimable by the producer.
+## Execution
 
-## Zero-copy views
+Core does not create or manage threads.
 
-`RecordTape::try_view(position)` returns a borrowed immutable view:
+For example, an application may use:
 
-```cpp
-struct RecordView {
-    Position position;
-    std::span<const std::byte> payload;
-};
+```text id="1q0mbd"
+Thread 1: Producer
+Thread 2: Validation Slider
+Thread 3: Hash Slider
 ```
 
-The view does not own or pin its slot.
-
-A caller using `try_view()` directly must guarantee that Tail cannot pass the position while the view is in use.
-
-Slider provides that guarantee through tract ordering: its frontier advances only after processing has completed and the borrowed view has been retired.
-
-## Static topology
-
-The supported Core topology is deliberately linear:
-
-```text
-Head -> Stage -> Stage -> ... -> Tail
-```
-
-There is no:
-
-* branch;
-* DAG;
-* runtime topology registry;
-* dynamic stage insertion;
-* separate Tail publication object.
-
-Topology wiring is a bootstrap operation.
-
-The terminal frontier is connected before `RecordTape::open()`:
-
-```cpp
-tape.SetTailRef(last_stage.GetFrontier());
-```
-
-After the tape is open, topology is immutable.
-
-Calling `SetTailRef()` after `open()` is a lifecycle violation.
-
-Every referenced frontier owner must outlive the object observing that frontier.
-
-## Lifecycle
-
-`RecordTape` has a one-shot lifecycle:
-
-```text
-Constructed -> Open -> Closed
-```
-
-A failed initial configuration or allocation leaves the tape in `Constructed`.
-
-A successful `open()` starts its only runtime lifetime.
-
-Calling `open()` while already open returns:
-
-```cpp
-RecordTapeOpenStatus::AlreadyOpen
-```
-
-`close()` is terminal and idempotent.
-
-Reopening a successfully used tape is not part of the contract.
-
-Bootstrap and shutdown are quiescent operations. Publishing, processing, and borrowed views must not race with lifecycle changes.
-
-## Memory behavior
-
-Record storage is allocated during `RecordTape::open()`.
-
-The tape uses fixed-size aligned slots in a bounded ring.
-
-The steady-state Core path performs no record-storage allocation:
-
-```text
-publish
-view
-Slider processing
-Tail observation
-```
-
-Head and stage frontiers are cache-line isolated where they are independently written.
-
-The current implementation uses a 64-byte cache-line assumption for this isolation.
-
-## Concurrency model
+or execute several stages from one thread.
 
 Core assumes:
 
-```text
+```text id="97rbtu"
 one producer per RecordTape
 one executor per Slider
 one owner/writer per Frontier
 ```
 
-Multiple stages may execute on different threads.
+Scheduling, polling, waiting, thread placement, and executor design belong to the application.
 
-The library does not create those threads and does not prescribe polling or waiting behavior.
+## Scope
 
-For example:
+Core provides:
 
-```text
-producer thread
-      |
-      v
-    Head
-      |
-      v
-Slider A thread
-      |
-      v
-     F1
-      |
-      v
-Slider B thread
-      |
-      v
-     F2 / Tail
+* bounded preallocated record storage;
+* monotonically increasing positions;
+* read-only borrowed record views;
+* explicit progress Frontiers;
+* ordered sequential stage mechanics through `Slider<Module>`;
+* bounded backpressure through the terminal Frontier;
+* synchronization through published Frontiers.
+
+Core does **not** provide:
+
+* worker threads;
+* executors;
+* schedulers;
+* wait strategies;
+* dynamic topology;
+* branching or DAG composition;
+* queues between stages;
+* persistence;
+* replay or recovery;
+* snapshots;
+* domain semantics.
+
+The supported Core topology is a static linear tract:
+
+```text id="iwxq9d"
+Head -> Stage -> Stage -> ... -> Tail
 ```
 
-A different application may execute several stages from one thread without changing the tract model.
+Topology is configured before `RecordTape::open()` and remains unchanged during processing.
 
-## Optional WAL
+## Complete Example
 
-Persistence is separate from Core.
+A complete concurrent Core example is available in:
 
-The repository currently exposes three build-tree targets:
-
-```text
-fexma::record_tract   Core tract mechanics
-fexma::wal            Persistence, physical WAL, Reader, Recovery
-fexma::binary         low-level binary helpers
+```text id="0cl3j4"
+examples/basic_tract/
 ```
 
-A Core-only application needs no WAL:
+Start with:
 
-```text
-Producer -> RecordTape -> Slider -> ... -> Tail
+```text id="1i7ax2"
+examples/basic_tract/demo_app.cpp
 ```
 
-Persistence can instead occupy a stage boundary:
+The example contains:
 
-```text
-Head / upstream Frontier
-          |
-          v
-     Persistence
-          |
-          v
-   durable Frontier
+```text id="q4w8tb"
+Producer
+   |
+   v
+RecordTape / Head
+   |
+   v
+PayloadValidationModule
+   |
+   v
+Validation Frontier
+   |
+   v
+RollingHashModule
+   |
+   v
+Hash Frontier / Tail
 ```
 
-Persistence publishes its frontier only after the selected records have been appended and physically synchronized.
-
-WAL lifecycle, physical format, validation, Reader, and Recovery are separate from the Core tract contract.
-
-See:
-
-* [doc/CONTRACT.md](doc/CONTRACT.md)
-* [doc/DESIGN.md](doc/DESIGN.md)
-* [doc/FILE_FORMAT.md](doc/FILE_FORMAT.md)
-
-## Repository layout
-
-```text
-include/fexma/record_tract/   Core public API
-src/record_tract/             Core implementation
-tests/core/                   Core tests
-
-include/fexma/wal/            WAL public API
-src/wal/                      WAL implementation
-tests/wal/                    WAL tests
-
-include/fexma/binary/         binary helpers
-tests/binary/                 binary-helper tests
-
-examples/basic_tract/         minimal concurrent Core example
-
-doc/                          detailed documentation
-```
+The producer and both stages run on separate threads. A small Tape capacity forces physical slot reuse and demonstrates bounded backpressure.
 
 ## Build
 
 The project requires C++20 and CMake.
 
-```bash
+```bash id="p9vb6n"
 cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Core consumers link:
+A Core consumer links:
 
-```cmake
+```cmake id="nxk1y3"
 target_link_libraries(my_target PRIVATE fexma::record_tract)
 ```
 
-WAL consumers link:
+The repository currently provides build-tree targets. Install rules and package exports are not yet provided.
 
-```cmake
-target_link_libraries(my_target PRIVATE fexma::wal)
+The repository also contains optional WAL functionality under a separate target:
+
+```text id="m7s5ak"
+fexma::record_tract   Core tract mechanics
+fexma::wal            Persistence, physical WAL, Reader, Recovery
+fexma::binary         low-level binary helpers
 ```
 
-The repository currently exposes build-tree targets only. Install and package-export rules are not yet provided.
+`fexma::wal` depends on `fexma::record_tract`. Core itself does not depend on WAL.
 
 ## Documentation
 
-* [HOW_TO_USE.md](doc/HOW_TO_USE.md) — minimal Core integration;
-* [CONTRACT.md](doc/CONTRACT.md) — public behavioral contract;
-* [INVARIANTS.md](doc/INVARIANTS.md) — topology, ownership, ordering, and concurrency invariants;
-* [DESIGN.md](doc/DESIGN.md) — architecture and implementation details;
-* [FILE_FORMAT.md](doc/FILE_FORMAT.md) — physical WAL format;
-* [BUILDING.md](doc/BUILDING.md) — build and test instructions.
+A practical reading order is:
 
-## Scope
-
-`record_tract` is a mechanism, not a processing framework.
-
-Its Core reduces to:
-
-```text
-bounded preallocated records
-        +
-monotonic frontiers
-        +
-ordered stages
-        +
-terminal-frontier reclamation
+```text id="r6u1eq"
+README
+  |
+  v
+HOW_TO_USE
+  |
+  +--> examples/basic_tract
+  |
+  v
+CONTRACT / INVARIANTS
+  |
+  v
+DESIGN
 ```
 
-Scheduling, thread placement, waiting, domain behavior, persistence, replay, snapshots, and higher-level recovery policy remain outside the Core.
+* [`doc/HOW_TO_USE.md`](doc/HOW_TO_USE.md) — practical Core walkthrough, from `RecordTape` to multi-stage tracts and custom stages.
+* [`doc/CONTRACT.md`](doc/CONTRACT.md) — exact public behavioral contract.
+* [`doc/INVARIANTS.md`](doc/INVARIANTS.md) — topology, ownership, ordering, lifetime, and concurrency invariants.
+* [`doc/DESIGN.md`](doc/DESIGN.md) — architecture and implementation decisions.
+* [`doc/BUILDING.md`](doc/BUILDING.md) — build and test instructions.
+* [`doc/FILE_FORMAT.md`](doc/FILE_FORMAT.md) — physical WAL format.
+
+For normal Core use, start with this README and `HOW_TO_USE.md`. Use `CONTRACT.md` and `INVARIANTS.md` when exact guarantees matter.
