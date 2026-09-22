@@ -116,16 +116,37 @@ target_link_libraries(test_record_tape PRIVATE fexma::record_tract)
 fexma_apply_warnings(test_record_tape)
 add_test(NAME test_record_tape COMMAND test_record_tape)
 
-add_executable(test_record_tape_set_tail_ref
-  tests/core/test_record_tape_set_tail_ref.cpp
+add_executable(test_core_fail_fast
+  tests/core/test_core_fail_fast.cpp
 )
-target_link_libraries(test_record_tape_set_tail_ref PRIVATE fexma::record_tract)
-fexma_apply_warnings(test_record_tape_set_tail_ref)
-add_test(NAME test_record_tape_set_tail_ref_open
-  COMMAND test_record_tape_set_tail_ref open
+target_link_libraries(test_core_fail_fast PRIVATE fexma::record_tract)
+fexma_apply_warnings(test_core_fail_fast)
+add_test(NAME test_core_fail_fast_set_tail_ref_open
+  COMMAND test_core_fail_fast set_tail_ref_open
 )
-add_test(NAME test_record_tape_set_tail_ref_closed
-  COMMAND test_record_tape_set_tail_ref closed
+add_test(NAME test_core_fail_fast_set_tail_ref_closed
+  COMMAND test_core_fail_fast set_tail_ref_closed
+)
+add_test(NAME test_core_fail_fast_reopen_closed
+  COMMAND test_core_fail_fast reopen_closed
+)
+add_test(NAME test_core_fail_fast_zero_read_count
+  COMMAND test_core_fail_fast zero_read_count
+)
+add_test(NAME test_core_fail_fast_zero_publish_count
+  COMMAND test_core_fail_fast zero_publish_count
+)
+add_test(NAME test_core_fail_fast_tail_ahead_of_head
+  COMMAND test_core_fail_fast tail_ahead_of_head
+)
+add_test(NAME test_core_fail_fast_retained_range_exceeds_capacity
+  COMMAND test_core_fail_fast retained_range_exceeds_capacity
+)
+add_test(NAME test_core_fail_fast_slider_upstream_regression
+  COMMAND test_core_fail_fast slider_upstream_regression
+)
+add_test(NAME test_core_fail_fast_slider_view_unavailable
+  COMMAND test_core_fail_fast slider_view_unavailable
 )
 
 add_executable(test_slider tests/core/test_slider.cpp)

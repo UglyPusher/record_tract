@@ -98,6 +98,28 @@ using Payload = std::array<std::byte, 16>;
   return valid;
 }
 
+[[nodiscard]] bool invalid_payload_size_does_not_advance_head() {
+  RecordTape tape;
+  if (tape.open({16, 2, 64}) != RecordTapeOpenStatus::Ok) return false;
+
+  const std::array<std::byte, 15> smaller_payload{};
+  const std::array<std::byte, 17> larger_payload{};
+  if (tape.try_publish(smaller_payload).status !=
+          PublishStatus::InvalidPayloadSize ||
+      tape.head() != 0 ||
+      tape.try_publish(larger_payload).status !=
+          PublishStatus::InvalidPayloadSize ||
+      tape.head() != 0) {
+    return false;
+  }
+
+  const PublishResult published = tape.try_publish(payload(0));
+  const bool valid = published.status == PublishStatus::Ok &&
+                     published.position == 0 && tape.head() == 1;
+  tape.close();
+  return valid;
+}
+
 [[nodiscard]] bool defaults_to_head_as_terminal_frontier() {
   RecordTape tape;
   if (tape.open({16, 1, 64}) != RecordTapeOpenStatus::Ok ||
@@ -213,8 +235,9 @@ int main() {
   if (!opens_without_physical_storage()) return 1;
   if (!close_clears_terminal_frontier_lifetime()) return 2;
   if (!failed_open_does_not_freeze_topology()) return 3;
-  if (!defaults_to_head_as_terminal_frontier()) return 4;
-  if (!follows_terminal_frontier_for_reuse()) return 5;
-  if (!producer_and_terminal_frontier_wrap_concurrently()) return 6;
+  if (!invalid_payload_size_does_not_advance_head()) return 4;
+  if (!defaults_to_head_as_terminal_frontier()) return 5;
+  if (!follows_terminal_frontier_for_reuse()) return 6;
+  if (!producer_and_terminal_frontier_wrap_concurrently()) return 7;
   return 0;
 }
