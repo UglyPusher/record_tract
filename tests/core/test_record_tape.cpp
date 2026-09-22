@@ -49,11 +49,40 @@ using Payload = std::array<std::byte, 16>;
          tape.try_view(0).status == ViewStatus::Closed;
 }
 
+[[nodiscard]] bool close_clears_terminal_frontier_lifetime() {
+  RecordTape unopened;
+  unopened.close();
+  unopened.close();
+  if (unopened.is_open() ||
+      unopened.try_publish(payload(0)).status != PublishStatus::Closed ||
+      unopened.try_view(0).status != ViewStatus::Closed) {
+    return false;
+  }
+
+  RecordTape tape;
+  {
+    Frontier terminal{};
+    tape.SetTailRef(terminal);
+    if (tape.open({16, 4, 64}) != RecordTapeOpenStatus::Ok) return false;
+    tape.close();
+    if (tape.is_open() ||
+        tape.try_publish(payload(0)).status != PublishStatus::Closed ||
+        tape.try_view(0).status != ViewStatus::Closed) {
+      return false;
+    }
+  }
+
+  tape.close();
+  return !tape.is_open() &&
+         tape.try_publish(payload(0)).status == PublishStatus::Closed &&
+         tape.try_view(0).status == ViewStatus::Closed;
+}
+
 [[nodiscard]] bool defaults_to_head_as_terminal_frontier() {
   RecordTape tape;
   if (tape.open({16, 1, 64}) != RecordTapeOpenStatus::Ok ||
       !tape.try_publish(payload(0)).ok() ||
-      tape.tail() != tape.head() ||
+      tape.GetFrontier().load(std::memory_order_acquire) != tape.head() ||
       tape.try_view(0).status != ViewStatus::Reclaimed ||
       !tape.try_publish(payload(1)).ok()) {
     return false;
@@ -77,7 +106,7 @@ using Payload = std::array<std::byte, 16>;
   }
 
   terminal.store(2, std::memory_order_release);
-  if (tape.tail() != 2 ||
+  if (terminal.load(std::memory_order_acquire) != 2 ||
       tape.try_view(1).status != ViewStatus::Reclaimed ||
       !tape.try_publish(payload(3)).ok() ||
       !tape.try_publish(payload(4)).ok()) {
@@ -95,7 +124,10 @@ using Payload = std::array<std::byte, 16>;
     }
   }
   terminal.store(5, std::memory_order_release);
-  if (tape.tail() != 5 || tape.tail() != tape.head()) return false;
+  if (terminal.load(std::memory_order_acquire) != 5 ||
+      terminal.load(std::memory_order_acquire) != tape.head()) {
+    return false;
+  }
   tape.close();
   return true;
 }
@@ -148,7 +180,9 @@ using Payload = std::array<std::byte, 16>;
 
   producer.join();
   terminal_stage.join();
-  const bool valid = !failed && tape.tail() == count && tape.head() == count;
+  const bool valid = !failed &&
+                     terminal.load(std::memory_order_acquire) == count &&
+                     tape.head() == count;
   tape.close();
   return valid;
 }
@@ -157,8 +191,9 @@ using Payload = std::array<std::byte, 16>;
 
 int main() {
   if (!opens_without_physical_storage()) return 1;
-  if (!defaults_to_head_as_terminal_frontier()) return 2;
-  if (!follows_terminal_frontier_for_reuse()) return 3;
-  if (!producer_and_terminal_frontier_wrap_concurrently()) return 4;
+  if (!close_clears_terminal_frontier_lifetime()) return 2;
+  if (!defaults_to_head_as_terminal_frontier()) return 3;
+  if (!follows_terminal_frontier_for_reuse()) return 4;
+  if (!producer_and_terminal_frontier_wrap_concurrently()) return 5;
   return 0;
 }

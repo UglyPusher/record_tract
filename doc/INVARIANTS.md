@@ -12,8 +12,11 @@ There is no branching, DAG, topology registry, or separate Tail publication
 atomic.
 
 Topology wiring is completed before `RecordTape::open()` and is immutable during
-runtime. `SetTailRef()` after open is a programmer/lifecycle error. Every
-stored Frontier reference must outlive the object observing it.
+runtime. `SetTailRef()` after open is a programmer/lifecycle error.
+The terminal Frontier must remain alive until the quiescent call to
+`RecordTape::close()`.
+Closing the Tape clears the stored non-owning reference. The terminal Frontier
+owner may be destroyed after `close()` returns.
 
 ## RecordTape boundaries
 

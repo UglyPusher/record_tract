@@ -69,14 +69,14 @@ using Payload = std::array<std::byte, 16>;
   const Payload blocked_payload = payload(capacity);
   if (tape.try_publish(std::span<const std::byte>{blocked_payload}).status !=
           PublishStatus::Full ||
-      tape.tail() != 0 || tape.head() != capacity) {
+      slider.current() != 0 || tape.head() != capacity) {
     return false;
   }
 
   const SliderStatus processed = slider.process();
   if (processed != SliderStatus::Processed ||
       read_frontier(slider.GetFrontier()) != capacity ||
-      tape.tail() != capacity || !publish(tape, capacity)) {
+      slider.current() != capacity || !publish(tape, capacity)) {
     return false;
   }
 
@@ -85,9 +85,9 @@ using Payload = std::array<std::byte, 16>;
     return false;
   }
 
-  return tape.tail() == capacity + 1 &&
-         read_frontier(slider.GetFrontier()) == tape.tail() &&
-         tape.head() == tape.tail();
+  return slider.current() == capacity + 1 &&
+         read_frontier(slider.GetFrontier()) == capacity + 1 &&
+         tape.head() == slider.current();
 }
 
 [[nodiscard]] bool terminal_frontier_releases_slots() {
@@ -101,7 +101,7 @@ using Payload = std::array<std::byte, 16>;
     return false;
   }
 
-  if (slider.process() != SliderStatus::Processed || tape.tail() != 2 ||
+  if (slider.process() != SliderStatus::Processed || slider.current() != 2 ||
       tape.try_view(0).status != ViewStatus::Reclaimed ||
       !publish(tape, 2)) {
     return false;
@@ -113,10 +113,10 @@ using Payload = std::array<std::byte, 16>;
   }
 
   if (slider.process() != SliderStatus::Processed ||
-      read_frontier(slider.GetFrontier()) != 3 || tape.tail() != 3) {
+      read_frontier(slider.GetFrontier()) != 3 || slider.current() != 3) {
     return false;
   }
-  return tape.tail() == 3 && tape.head() == 3;
+  return slider.current() == 3 && tape.head() == 3;
 }
 
 class OrderedProbeModule final {
@@ -185,7 +185,7 @@ private:
       if (result == SliderStatus::Processed) {
         const Position published = read_frontier(slider.GetFrontier());
         if (published != slider.current() || published > tape.head() ||
-            tape.tail() != published) {
+            slider.current() != published) {
           failed.store(true, std::memory_order_release);
           return;
         }
@@ -207,8 +207,8 @@ private:
   consumer.join();
 
   return !failed.load(std::memory_order_acquire) && module.valid() &&
-         module.count() == message_count && tape.tail() == message_count &&
-      read_frontier(slider.GetFrontier()) == message_count &&
+         module.count() == message_count && slider.current() == message_count &&
+         read_frontier(slider.GetFrontier()) == message_count &&
          tape.head() == message_count;
 }
 

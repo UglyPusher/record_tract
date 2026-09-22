@@ -161,7 +161,7 @@ constexpr PhysicalWalConfig physical_config{
       control.sync_calls != 1 ||
       no_op_slider.process() != SliderStatus::Processed ||
       read_frontier(no_op_slider.GetFrontier()) != 2 ||
-      tape.tail() != 2) {
+      no_op_slider.current() != 2) {
     return false;
   }
 
@@ -172,7 +172,7 @@ constexpr PhysicalWalConfig physical_config{
       control.sync_calls != 2 ||
       no_op_slider.process() != SliderStatus::Processed ||
       read_frontier(no_op_slider.GetFrontier()) != 4 ||
-      tape.tail() != 4) {
+      no_op_slider.current() != 4) {
     return false;
   }
 
@@ -183,7 +183,7 @@ constexpr PhysicalWalConfig physical_config{
       control.append_calls != 5 || control.sync_calls != 3 ||
       no_op_slider.process() != SliderStatus::Processed ||
       read_frontier(no_op_slider.GetFrontier()) != 5 ||
-      tape.tail() != 5 || tape.head() != 5) {
+      no_op_slider.current() != 5 || tape.head() != 5) {
     return false;
   }
 
@@ -386,7 +386,7 @@ constexpr PhysicalWalConfig physical_config{
   const bool valid = drained == SliderStatus::Processed &&
                      hidden == SliderStatus::Empty &&
                      read_frontier(no_op_slider.GetFrontier()) == 1 &&
-                     tape.tail() == 1 && tape.head() == 3;
+                     no_op_slider.current() == 1 && tape.head() == 3;
   (void)persistence.close();
   tape.close();
   std::filesystem::remove(path);

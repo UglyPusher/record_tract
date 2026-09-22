@@ -28,8 +28,10 @@ no stages, the Tape observes its own Head and therefore `Tail == Head`.
 
 Topology is composed before runtime and is immutable after `RecordTape::open()`.
 `SetTailRef()` is bootstrap wiring; calling it after open terminates. The
-referenced Frontier owner must outlive the Tape. The tract is linear; branching
-and DAG topology are outside this design.
+The terminal Frontier must remain alive until the quiescent call to
+`RecordTape::close()`. Closing the Tape clears the stored non-owning reference.
+The terminal Frontier owner may be destroyed after `close()` returns. The tract
+is linear; branching and DAG topology are outside this design.
 
 ## RecordTape
 

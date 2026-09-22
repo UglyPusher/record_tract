@@ -748,7 +748,9 @@ A Frontier connected through:
 SetTailRef(...)
 ```
 
-must remain alive for as long as the Tape may access it.
+The terminal Frontier must remain alive until the quiescent call to
+`RecordTape::close()`. Closing the Tape clears the stored non-owning reference.
+The terminal Frontier owner may be destroyed after `close()` returns.
 
 ### RecordView Is a Borrowed View
 

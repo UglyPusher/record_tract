@@ -18,7 +18,6 @@ public:
 
   bool is_open() const noexcept;
   Position head() const noexcept;
-  Position tail() const noexcept;
   std::uint32_t payload_size() const noexcept;
   const Frontier& GetFrontier() const noexcept;
 };
@@ -67,7 +66,11 @@ tape.SetTailRef(a.GetFrontier());
 ```
 
 After open, topology is immutable. `SetTailRef()` after open is a lifecycle
-violation and terminates. The referenced Frontier owner must outlive the Tape.
+violation and terminates.
+
+The terminal Frontier must remain alive until the quiescent call to
+`RecordTape::close()`. Closing the Tape clears the stored non-owning reference.
+The terminal Frontier owner may be destroyed after `close()` returns.
 
 ## Slider processing
 

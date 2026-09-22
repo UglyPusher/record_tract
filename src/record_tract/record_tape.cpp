@@ -171,7 +171,12 @@ AccessResult RecordTape::try_view(Position position) const noexcept {
 }
 
 void RecordTape::close() noexcept {
+  if (!is_open()) {
+    return;
+  }
+
   open_.store(false, std::memory_order_release);
+  tail_frontier_ = nullptr;
   buffer_.release();
 }
 
@@ -181,10 +186,6 @@ bool RecordTape::is_open() const noexcept {
 
 Position RecordTape::head() const noexcept {
   return head_boundary_.value.load(std::memory_order_acquire);
-}
-
-Position RecordTape::tail() const noexcept {
-  return tail_frontier_->load(std::memory_order_acquire);
 }
 
 } // namespace fexma::record_tract

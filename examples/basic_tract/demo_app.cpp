@@ -78,8 +78,7 @@ int main() {
       hashing.processed() == record_count &&
       hashing.value() == demo::expected_hash(record_count) &&
       validation_slider.current() == record_count &&
-      hash_slider.current() == record_count && tape.head() == record_count &&
-      tape.tail() == record_count;
+      hash_slider.current() == tape.head() && tape.head() == record_count;
 
   tape.close();
   return valid ? 0 : 2;

@@ -48,10 +48,14 @@ public:
   try_publish(std::span<const std::byte> payload) noexcept;
   [[nodiscard]] AccessResult try_view(Position position) const noexcept;
 
-  // Cold-path topology wiring. The terminal frontier must outlive the tape.
+  // Cold-path topology wiring. The terminal Frontier reference is non-owning.
   void SetTailRef(const Frontier& frontier) noexcept;
 
   // Cold-path lifecycle: producer, terminal stage, and view users must be stopped.
+  // The terminal Frontier must remain alive until the quiescent call to
+  // `RecordTape::close()`. Closing the Tape clears the stored non-owning
+  // reference. The terminal Frontier owner may be destroyed after `close()`
+  // returns.
   void close() noexcept;
 
   [[nodiscard]] bool is_open() const noexcept;
@@ -62,7 +66,6 @@ public:
   [[nodiscard]] const Frontier& GetFrontier() const noexcept {
     return head_boundary_.value;
   }
-  [[nodiscard]] Position tail() const noexcept;
 
 private:
   static constexpr std::size_t cache_line_size = 64;
