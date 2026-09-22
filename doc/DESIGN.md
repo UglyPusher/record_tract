@@ -61,10 +61,23 @@ Frontier only after successful module completion. `ModuleFailed` is a normal
 module runtime outcome; broken frontier, view, and lifecycle conditions are not
 modeled as statuses.
 
-`ExecutionPolicy::read_count` controls internal read passes and
-`publish_count` controls Frontier publication cadence. Both are bootstrap
-preconditions greater than zero. A `process()` call drains the observed
-upstream range unless the module fails.
+`ExecutionPolicy::read_count` and `publish_count` are bootstrap preconditions
+and must be greater than zero.
+
+`read_count` specifies the maximum number of consecutive records in one
+processing portion.
+
+A single `process()` call processes as many portions as needed to cover the
+range observed at the beginning of the call. Therefore, `read_count` does not
+limit the total number of records processed by one call.
+
+`publish_count` specifies how many successfully processed records may
+accumulate before the Slider publishes advancement of its Frontier.
+
+Processing-portion boundaries do not cause Frontier publication. Publication
+is controlled solely by `publish_count`.
+
+Any successfully processed remainder is published before `process()` returns.
 
 Only one executor mutates a Slider. Its module and source Tape must remain
 alive for the Slider lifetime.

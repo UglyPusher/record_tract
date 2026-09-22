@@ -88,9 +88,23 @@ returned as processing statuses. `ViewStatus` remains part of direct
 `RecordTape::try_view()` results for callers that use that API directly.
 
 `ExecutionPolicy::read_count` and `publish_count` are bootstrap preconditions
-and must be greater than zero. `publish_count` controls release-publication
-cadence. A successful residual prefix is published before return, including a
-successful prefix before `ModuleFailed`.
+and must be greater than zero.
+
+`read_count` specifies the maximum number of consecutive records in one
+processing portion.
+
+A single `process()` call processes as many portions as needed to cover the
+range observed at the beginning of the call. Therefore, `read_count` does not
+limit the total number of records processed by one call.
+
+`publish_count` specifies how many successfully processed records may
+accumulate before the Slider publishes advancement of its Frontier.
+
+Processing-portion boundaries do not cause Frontier publication. Publication
+is controlled solely by `publish_count`.
+
+Any successfully processed remainder is published before `process()` returns,
+including a successful prefix before `ModuleFailed`.
 
 ## RecordTape lifecycle
 

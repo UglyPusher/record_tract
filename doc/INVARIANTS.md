@@ -92,9 +92,20 @@ runtime status.
 ## Slider policy and status
 
 `ExecutionPolicy::read_count` and `publish_count` must be greater than zero.
-They are bootstrap preconditions, not normalization inputs. `read_count` only
-partitions internal traversal. `publish_count` controls Frontier publication
-cadence. A module must complete a position before the Slider publishes the next
+They are bootstrap preconditions, not normalization inputs.
+
+`read_count` specifies the maximum number of consecutive records in one
+processing portion. A single `process()` call processes as many portions as
+needed to cover the range observed at the beginning of the call. Therefore,
+`read_count` does not limit the total number of records processed by one call.
+
+`publish_count` specifies how many successfully processed records may
+accumulate before the Slider publishes advancement of its Frontier.
+Processing-portion boundaries do not cause Frontier publication. Publication is
+controlled solely by `publish_count`. Any successfully processed remainder is
+published before `process()` returns.
+
+A module must complete a position before the Slider publishes the next
 exclusive Frontier value.
 
 Valid Slider outcomes are:

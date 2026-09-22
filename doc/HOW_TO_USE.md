@@ -584,9 +584,20 @@ read_count
 publish_count
 ```
 
-`read_count` specifies the maximum number of records that a Slider accepts for processing in one batch.
+`read_count` specifies the maximum number of consecutive records in one
+processing portion.
 
-`publish_count` specifies the number of successfully processed records after which the Slider publishes advancement of its Frontier.
+A single `process()` call processes as many portions as needed to cover the
+range observed at the beginning of the call. Therefore, `read_count` does not
+limit the total number of records processed by one call.
+
+`publish_count` specifies how many successfully processed records may
+accumulate before the Slider publishes advancement of its Frontier.
+
+Processing-portion boundaries do not cause Frontier publication. Publication
+is controlled solely by `publish_count`.
+
+Any successfully processed remainder is published before `process()` returns.
 
 For example:
 
@@ -596,11 +607,13 @@ ExecutionPolicy{8, 4}
 
 means:
 
-> The Slider accepts no more than 8 records for processing in one batch and publishes its Frontier after every 4 successfully processed records.
+> The Slider divides the observed range into processing portions of no more than
+> 8 consecutive records and publishes its Frontier after every 4 successfully
+> processed records. One `process()` call still processes the entire range
+> observed at the beginning of the call.
 
-If successfully processed records remain at the end of the batch but have not yet been reflected in the Frontier, the Slider publishes that remainder before completing the batch.
-
-The policy allows batching behavior to be changed without changing the Module.
+The policy allows processing-portion and Frontier-publication behavior to be
+changed without changing the Module.
 
 For initial use of the library, the default policy is usually sufficient.
 
@@ -622,7 +635,9 @@ SliderStatus::ModuleFailed
 
 It is important to distinguish successfully processed records from the record on which the failure occurred.
 
-If the Slider successfully processed several records before the failure, but their progress has not yet been published because of the batching policy, that successfully processed prefix is published.
+If the Slider successfully processed several records before the failure, but
+their progress has not yet been published because `publish_count` has not yet
+been reached, that successfully processed prefix is published.
 
 The position for which the Module returned `false` is **not** considered complete and is not included in the Frontier.
 
