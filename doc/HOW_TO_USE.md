@@ -485,7 +485,10 @@ A slow final stage therefore eventually limits the producer's progress.
 
 This creates a bounded pipeline without requiring an additional queue-management mechanism.
 
-The topology is configured before `open()` and does not change after processing begins.
+Topology may be configured until the first successful `RecordTape::open()`.
+The first successful open freezes topology permanently. Calling `SetTailRef()`
+while the Tape is Open or after it has been Closed is a lifecycle violation and
+terminates. A failed `open()` does not freeze topology.
 
 ---
 

@@ -234,7 +234,9 @@ The supported Core topology is a static linear tract:
 Head -> Stage -> Stage -> ... -> Tail
 ```
 
-Topology is configured before `RecordTape::open()` and remains unchanged during processing.
+Topology may be configured until the first successful `RecordTape::open()`.
+The first successful open freezes topology permanently. A failed `open()` does
+not freeze topology.
 
 ## Complete Example
 

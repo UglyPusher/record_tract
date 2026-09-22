@@ -48,7 +48,10 @@ public:
   try_publish(std::span<const std::byte> payload) noexcept;
   [[nodiscard]] AccessResult try_view(Position position) const noexcept;
 
-  // Cold-path topology wiring. The terminal Frontier reference is non-owning.
+  // Topology may be configured until the first successful RecordTape::open().
+  // The first successful open freezes topology permanently. Calling
+  // SetTailRef() while the Tape is Open or after it has been Closed is a
+  // lifecycle violation and terminates. A failed open does not freeze topology.
   void SetTailRef(const Frontier& frontier) noexcept;
 
   // Cold-path lifecycle: producer, terminal stage, and view users must be stopped.

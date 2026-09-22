@@ -99,7 +99,7 @@ RecordTape::RecordTape() noexcept : tail_frontier_(&head_boundary_.value) {}
 RecordTape::~RecordTape() { close(); }
 
 void RecordTape::SetTailRef(const Frontier& frontier) noexcept {
-  if (is_open()) [[unlikely]] {
+  if (opened_once_) [[unlikely]] {
     std::terminate();
   }
   tail_frontier_ = &frontier;

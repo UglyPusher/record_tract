@@ -65,8 +65,12 @@ Slider a{tape, tape.GetFrontier(), module_a};
 tape.SetTailRef(a.GetFrontier());
 ```
 
-After open, topology is immutable. `SetTailRef()` after open is a lifecycle
-violation and terminates.
+Topology may be configured until the first successful `RecordTape::open()`.
+The first successful open freezes topology permanently. Calling
+`SetTailRef()` while the Tape is Open or after it has been Closed is a
+lifecycle violation and terminates.
+
+A failed `open()` does not freeze topology.
 
 The terminal Frontier must remain alive until the quiescent call to
 `RecordTape::close()`. Closing the Tape clears the stored non-owning reference.

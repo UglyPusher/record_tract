@@ -78,6 +78,26 @@ using Payload = std::array<std::byte, 16>;
          tape.try_view(0).status == ViewStatus::Closed;
 }
 
+[[nodiscard]] bool failed_open_does_not_freeze_topology() {
+  Frontier first_terminal{};
+  Frontier second_terminal{};
+  RecordTape tape;
+  tape.SetTailRef(first_terminal);
+  if (tape.open({}) != RecordTapeOpenStatus::InvalidConfig) return false;
+
+  tape.SetTailRef(second_terminal);
+  if (tape.open({16, 1, 64}) != RecordTapeOpenStatus::Ok ||
+      !tape.try_publish(payload(0)).ok() ||
+      tape.try_publish(payload(1)).status != PublishStatus::Full) {
+    return false;
+  }
+
+  second_terminal.store(1, std::memory_order_release);
+  const bool valid = tape.try_publish(payload(1)).ok();
+  tape.close();
+  return valid;
+}
+
 [[nodiscard]] bool defaults_to_head_as_terminal_frontier() {
   RecordTape tape;
   if (tape.open({16, 1, 64}) != RecordTapeOpenStatus::Ok ||
@@ -192,8 +212,9 @@ using Payload = std::array<std::byte, 16>;
 int main() {
   if (!opens_without_physical_storage()) return 1;
   if (!close_clears_terminal_frontier_lifetime()) return 2;
-  if (!defaults_to_head_as_terminal_frontier()) return 3;
-  if (!follows_terminal_frontier_for_reuse()) return 4;
-  if (!producer_and_terminal_frontier_wrap_concurrently()) return 5;
+  if (!failed_open_does_not_freeze_topology()) return 3;
+  if (!defaults_to_head_as_terminal_frontier()) return 4;
+  if (!follows_terminal_frontier_for_reuse()) return 5;
+  if (!producer_and_terminal_frontier_wrap_concurrently()) return 6;
   return 0;
 }

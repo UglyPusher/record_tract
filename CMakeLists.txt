@@ -116,6 +116,18 @@ target_link_libraries(test_record_tape PRIVATE fexma::record_tract)
 fexma_apply_warnings(test_record_tape)
 add_test(NAME test_record_tape COMMAND test_record_tape)
 
+add_executable(test_record_tape_set_tail_ref
+  tests/core/test_record_tape_set_tail_ref.cpp
+)
+target_link_libraries(test_record_tape_set_tail_ref PRIVATE fexma::record_tract)
+fexma_apply_warnings(test_record_tape_set_tail_ref)
+add_test(NAME test_record_tape_set_tail_ref_open
+  COMMAND test_record_tape_set_tail_ref open
+)
+add_test(NAME test_record_tape_set_tail_ref_closed
+  COMMAND test_record_tape_set_tail_ref closed
+)
+
 add_executable(test_slider tests/core/test_slider.cpp)
 target_link_libraries(test_slider PRIVATE fexma::record_tract)
 fexma_apply_warnings(test_slider)

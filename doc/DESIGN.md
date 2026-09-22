@@ -26,8 +26,10 @@ does not retain views of those positions. The terminal Frontier is the Tail
 boundary observed by RecordTape. There is no second Tail progress state. With
 no stages, the Tape observes its own Head and therefore `Tail == Head`.
 
-Topology is composed before runtime and is immutable after `RecordTape::open()`.
-`SetTailRef()` is bootstrap wiring; calling it after open terminates. The
+Topology may be configured until the first successful `RecordTape::open()`.
+The first successful open freezes topology permanently. Calling
+`SetTailRef()` while the Tape is Open or after it has been Closed is a
+lifecycle violation and terminates. A failed `open()` does not freeze topology.
 The terminal Frontier must remain alive until the quiescent call to
 `RecordTape::close()`. Closing the Tape clears the stored non-owning reference.
 The terminal Frontier owner may be destroyed after `close()` returns. The tract
