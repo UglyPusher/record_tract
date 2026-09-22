@@ -279,11 +279,66 @@ The producer and both stages run on separate threads. A small Tape capacity forc
 
 The project requires C++20 and CMake.
 
-```bash id="p9vb6n"
+### Standalone
+
+The default standalone build includes Core, WAL, tests, and the example:
+
+```bash
 cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
+
+For a Core-only standalone build:
+
+```bash
+cmake -S . -B build-core \
+  -DRECORD_TRACT_BUILD_WAL=OFF \
+  -DRECORD_TRACT_BUILD_EXAMPLES=OFF \
+  -DRECORD_TRACT_BUILD_TESTS=OFF
+
+cmake --build build-core
+```
+
+Tests can also be disabled through the standard CTest option:
+
+```bash
+cmake -S . -B build \
+  -DBUILD_TESTING=OFF
+```
+
+### FetchContent
+
+When `record_tract` is included as a subproject, WAL, tests, and examples are
+disabled by default. A Core-only consumer can use:
+
+```cmake
+include(FetchContent)
+
+FetchContent_Declare(
+  record_tract
+  GIT_REPOSITORY https://github.com/UglyPusher/record_tract.git
+  GIT_TAG <pinned-commit-or-tag>
+)
+
+FetchContent_MakeAvailable(record_tract)
+
+target_link_libraries(consumer PRIVATE fexma::record_tract)
+```
+
+To opt in to WAL, set the project-specific option before making the dependency
+available:
+
+```cmake
+set(RECORD_TRACT_BUILD_WAL ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(record_tract)
+
+target_link_libraries(consumer PRIVATE fexma::wal)
+```
+
+Repository tests and examples remain disabled unless their corresponding
+`RECORD_TRACT_BUILD_TESTS` and `RECORD_TRACT_BUILD_EXAMPLES` options are also
+enabled.
 
 A Core consumer links:
 
