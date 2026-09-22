@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux / ${{ matrix.toolchain }} / ${{ matrix.build_type }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: GCC
+            compiler: g++
+            build_type: Debug
+          - toolchain: GCC
+            compiler: g++
+            build_type: Release
+          - toolchain: Clang
+            compiler: clang++
+            build_type: Debug
+          - toolchain: Clang
+            compiler: clang++
+            build_type: Release
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Run demo
+        run: ./build/example_basic_tract
+
+  asan-ubsan:
+    name: Linux / Clang / ASan + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Run demo
+        run: ./build/example_basic_tract
+
+  tsan:
+    name: Linux / GCC / TSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_COMPILER=g++
+          -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g -O1"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Run demo
+        run: ./build/example_basic_tract
+
+  msvc:
+    name: Windows / MSVC / ${{ matrix.build_type }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type:
+          - Debug
+          - Release
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure
+        run: cmake -S . -B build
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }} --parallel
+      - name: Test
+        run: >-
+          ctest --test-dir build
+          --build-config ${{ matrix.build_type }}
+          --output-on-failure
+      - name: Run demo
+        run: .\build\${{ matrix.build_type }}\example_basic_tract.exe
+
+  fetchcontent-core:
+    name: Linux / FetchContent / Core only
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure consumer
+        run: >-
+          cmake
+          -S tests/consumer/core_only
+          -B consumer-build
+          -DRECORD_TRACT_SOURCE_DIR="${GITHUB_WORKSPACE}"
+      - name: Build default ALL target
+        run: cmake --build consumer-build --parallel
+      - name: Verify Core-only artifacts
+        shell: bash
+        run: |
+          core_archive="$(find consumer-build -type f -name 'libfexma_record_tract.a' -print)"
+          if [[ -z "${core_archive}" ]]; then
+            echo "Core archive was not built" >&2
+            exit 1
+          fi
+
+          unexpected="$(find consumer-build -type f \( \
+            -name 'libfexma_wal.a' -o \
+            -name 'example_basic_tract' -o \
+            -name 'test_binary_little_endian' -o \
+            -name 'test_wal_reader' -o \
+            -name 'test_wal_recovery' -o \
+            -name 'test_record_tape' -o \
+            -name 'test_core_fail_fast' -o \
+            -name 'test_slider' -o \
+            -name 'test_bare_pipeline' -o \
+            -name 'test_wal_persistence' \
+          \) -print)"
+          if [[ -n "${unexpected}" ]]; then
+            echo "Unexpected optional artifacts:" >&2
+            echo "${unexpected}" >&2
+            exit 1
+          fi
+      - name: Run consumer
+        run: ./consumer-build/core_only_consumer
