@@ -31,10 +31,8 @@ add_executable(example_basic_tract_from_github
   demo_app.cpp
 )
 
-target_compile_features(example_basic_tract_from_github PRIVATE cxx_std_20)
-target_link_libraries(example_basic_tract_from_github
-  PRIVATE
-    fexma::record_tract
+target_link_libraries(example_basic_tract
+    PRIVATE fexma::record_tract
 )
 
 if(MSVC)
