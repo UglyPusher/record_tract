@@ -28,17 +28,15 @@ public:
     }
 
     ++expected_position_;
-    ++processed_count_;
     return true;
   }
 
   [[nodiscard]] core::Position processed() const noexcept {
-    return processed_count_;
+    return expected_position_;
   }
 
 private:
   core::Position expected_position_{};
-  core::Position processed_count_{};
 };
 
 class RollingHashModule final {
