@@ -117,7 +117,6 @@ void run_producer(core::RecordTape& tape, std::atomic<bool>& failed) {
     case core::PublishStatus::InvalidPayloadSize:
     case core::PublishStatus::PositionExhausted:
     case core::PublishStatus::Closed:
-    default:
       failed.store(true, std::memory_order_release);
       return;
     }
@@ -136,7 +135,6 @@ void run_validation_stage(ValidationSlider& slider,
       std::this_thread::yield();
       continue;
     case core::SliderStatus::ModuleFailed:
-    default:
       failed.store(true, std::memory_order_release);
       return;
     }
@@ -154,7 +152,6 @@ void run_hash_stage(HashSlider& slider, std::atomic<bool>& failed) {
       std::this_thread::yield();
       continue;
     case core::SliderStatus::ModuleFailed:
-    default:
       failed.store(true, std::memory_order_release);
       return;
     }
