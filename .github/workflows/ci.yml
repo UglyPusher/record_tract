@@ -46,6 +46,22 @@ jobs:
       - name: Run demo
         run: ./build/example_basic_tract
 
+  basic-tract-standalone:
+    name: Linux / basic_tract / standalone
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure
+        run: >-
+          cmake
+          -S examples/basic_tract
+          -B demo-build
+          -DCMAKE_BUILD_TYPE=Debug
+      - name: Build
+        run: cmake --build demo-build --parallel
+      - name: Run demo
+        run: ./demo-build/example_basic_tract
+
   asan-ubsan:
     name: Linux / Clang / ASan + UBSan
     runs-on: ubuntu-latest
