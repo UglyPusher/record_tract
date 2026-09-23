@@ -1,10 +1,9 @@
 /**
  * @file demo_payload.hpp
- * @brief Deterministic record format and hashing helpers for the basic demo.
+ * @brief Application message, payload encoding, and hashing helpers.
  *
- * Every 16-byte payload stores its tape position and a derived value as two
- * little-endian integers. The same representation is used to calculate the
- * expected final hash during validation.
+ * DemoMessage is application data. The demo explicitly encodes it as a fixed
+ * 16-byte little-endian payload; RecordTape transports those bytes opaquely.
  */
 
 #pragma once
@@ -23,6 +22,11 @@ namespace core = fexma::record_tract;
 inline constexpr std::uint32_t payload_size = 16;
 inline constexpr std::uint64_t hash_seed = 0x6a09e667f3bcc909ull;
 inline constexpr std::uint64_t hash_prime = 0x100000001b3ull;
+
+struct DemoMessage final {
+  std::uint64_t sequence{};
+  std::uint64_t value{};
+};
 
 using Payload = std::array<std::byte, payload_size>;
 
@@ -45,11 +49,20 @@ load_u64(std::span<const std::byte> bytes, std::size_t offset) noexcept {
   return value;
 }
 
-[[nodiscard]] inline Payload make_payload(core::Position position) noexcept {
+[[nodiscard]] inline Payload encode(const DemoMessage& message) noexcept {
   Payload bytes{};
-  store_u64(bytes, 0, position);
-  store_u64(bytes, sizeof(position), position * 3u + 0x5a5a5a5au);
+  store_u64(bytes, 0, message.sequence);
+  store_u64(bytes, sizeof(message.sequence), message.value);
   return bytes;
+}
+
+[[nodiscard]] inline bool decode(std::span<const std::byte> bytes,
+                                 DemoMessage& message) noexcept {
+  if (bytes.size() != payload_size) return false;
+
+  message.sequence = load_u64(bytes, 0);
+  message.value = load_u64(bytes, sizeof(message.sequence));
+  return true;
 }
 
 [[nodiscard]] inline std::uint64_t
@@ -67,7 +80,8 @@ hash_payload(std::uint64_t state,
 expected_hash(core::Position count) noexcept {
   std::uint64_t hash = hash_seed;
   for (core::Position position = 0; position < count; ++position) {
-    hash = hash_payload(hash, make_payload(position));
+    const DemoMessage message{position, position * 3u + 0x5a5a5a5au};
+    hash = hash_payload(hash, encode(message));
   }
   return hash;
 }

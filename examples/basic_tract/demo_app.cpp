@@ -91,7 +91,9 @@ void run_producer(core::RecordTape& tape, std::atomic<bool>& failed,
   for (core::Position position = 0; position < record_count;) {
     if (failed.load(std::memory_order_acquire)) return;
 
-    const demo::Payload payload = demo::make_payload(position);
+    const demo::DemoMessage message{position,
+                                   position * 3u + 0x5a5a5a5au};
+    const demo::Payload payload = demo::encode(message);
     const core::PublishResult result =
         tape.try_publish(std::span<const std::byte>{payload});
 

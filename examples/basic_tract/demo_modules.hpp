@@ -19,11 +19,11 @@ namespace basic_tract_demo {
 class PayloadValidationModule final {
 public:
   [[nodiscard]] bool process(const core::RecordView& record) noexcept {
-    if (record.payload.size() != payload_size ||
-        record.position != expected_position_ ||
-        load_u64(record.payload, 0) != expected_position_ ||
-        load_u64(record.payload, sizeof(expected_position_)) !=
-            expected_position_ * 3u + 0x5a5a5a5au) {
+    DemoMessage message{};
+    if (record.position != expected_position_ ||
+        !decode(record.payload, message) ||
+        message.sequence != expected_position_ ||
+        message.value != expected_position_ * 3u + 0x5a5a5a5au) {
       return false;
     }
 
