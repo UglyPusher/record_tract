@@ -197,7 +197,52 @@ Frontier 2
 
 ---
 
-## 3. RecordTape Without Stages
+## 3. Application Data and Record Payload
+
+Application data is not automatically a Record Tract object. `RecordTape` stores and transports
+opaque byte payloads; the payload representation and the rules for encoding and decoding it belong
+to the application. Core does not define serialization, schemas, byte order, ABI layout, or domain
+types.
+
+For example, an application may define its own message type:
+
+```cpp
+struct DemoMessage final {
+    std::uint64_t sequence{};
+    std::uint64_t value{};
+};
+```
+
+The application encodes that typed data into a fixed-size byte payload before publishing it:
+
+```text
+DemoMessage
+    |
+    | encode()
+    v
+fixed-size byte payload
+    |
+    | RecordTape::try_publish()
+    v
+RecordTape
+```
+
+On the consuming side, `RecordView::payload` is still an opaque byte view. The application may
+decode it when typed processing is needed:
+
+```text
+RecordView::payload
+    |
+    | decode()
+    v
+DemoMessage
+```
+
+A Module may also process raw payload bytes directly. The executable `examples/basic_tract`
+demonstrates both approaches: `PayloadValidationModule` decodes into `DemoMessage`, while
+`RollingHashModule` processes the raw payload bytes. Core remains unaware of either conversion.
+
+## 4. RecordTape Without Stages
 
 The simplest case does not require a `Slider` at all.
 
@@ -211,9 +256,9 @@ and open it:
 
 ```cpp
 const auto status = tape.open({
-    payload_size,
-    capacity,
-    fexma::record_tract::default_alignment
+    .payload_size = payload_size,
+    .capacity = capacity,
+    .alignment = fexma::record_tract::default_alignment,
 });
 
 if (status != fexma::record_tract::RecordTapeOpenStatus::Ok) {
@@ -255,6 +300,11 @@ When no stages are connected to the Tape, there is no separate consumer retainin
 
 This case is primarily useful for understanding `RecordTape` itself. In an actual tract, Tail is normally defined by the final processing stage.
 
+`PublishStatus::Ok` means publication succeeded. `PublishStatus::Full` is normal, retryable bounded
+backpressure. Other non-`Ok` statuses—`InvalidPayloadSize`, `PositionExhausted`, and `Closed`—must be
+handled according to the public contract; the executable `examples/basic_tract` shows exhaustive
+handling.
+
 When finished:
 
 ```cpp
@@ -263,7 +313,7 @@ tape.close();
 
 ---
 
-## 4. Writing a Module
+## 5. Writing a Module
 
 Usually, a record needs to be processed by application code.
 
@@ -302,7 +352,7 @@ It is ordinary application code that processes one record.
 
 ---
 
-## 5. Adding a Slider
+## 6. Adding a Slider
 
 Create a Module:
 
@@ -382,7 +432,7 @@ status == SliderStatus::ModuleFailed
 
 ---
 
-## 6. Building a Chain of Stages
+## 7. Building a Chain of Stages
 
 Add a second Module:
 
@@ -448,7 +498,7 @@ Each stage depends only on the Frontier of its immediate predecessor.
 
 ---
 
-## 7. Connecting Tail
+## 8. Connecting Tail
 
 The Tape needs to know which stage is the final consumer of a record.
 
@@ -492,21 +542,35 @@ terminates. A failed `open()` does not freeze topology.
 
 ---
 
-## 8. Where Stages Run
+## 9. Where Stages Run
 
 `record_tract` does not create threads.
 
 The simplest Slider execution loop looks like this:
 
 ```cpp
-while (running) {
-    const auto status = validation_slider.process();
+bool running = true;
 
-    if (status == SliderStatus::Empty) {
+while (running) {
+    switch (validation_slider.process()) {
+    case SliderStatus::Processed:
+        break;
+
+    case SliderStatus::Empty:
+        // No work is currently available.
         std::this_thread::yield();
+        break;
+
+    case SliderStatus::ModuleFailed:
+        // Apply the application's failure policy; this example stops the loop.
+        running = false;
+        break;
     }
 }
 ```
+
+`Processed` indicates normal progress, `Empty` means no work is currently available, and
+`ModuleFailed` requires application-level handling.
 
 The application may run different Sliders on different threads:
 
@@ -526,7 +590,7 @@ For Core, what matters is maintaining Frontier ordering and the single-writer ru
 
 ---
 
-## 9. Backpressure
+## 10. Backpressure
 
 `RecordTape` has a fixed capacity.
 
@@ -563,20 +627,16 @@ Core does not impose such a policy.
 
 ---
 
-## 10. ExecutionPolicy
+## 11. ExecutionPolicy
 
-By default, a Slider uses:
-
-```cpp
-ExecutionPolicy{1, 1}
-```
+By default, a Slider uses `read_count` and `publish_count` values of `1`.
 
 A policy can be specified explicitly when needed:
 
 ```cpp
 constexpr fexma::record_tract::ExecutionPolicy policy{
-    8,
-    4
+    .read_count = 8,
+    .publish_count = 4,
 };
 ```
 
@@ -602,13 +662,7 @@ is controlled solely by `publish_count`.
 
 Any successfully processed remainder is published before `process()` returns.
 
-For example:
-
-```cpp
-ExecutionPolicy{8, 4}
-```
-
-means:
+This policy means:
 
 > The Slider divides the observed range into processing portions of no more than
 > 8 consecutive records and publishes its Frontier after every 4 successfully
@@ -622,7 +676,7 @@ For initial use of the library, the default policy is usually sufficient.
 
 ---
 
-## 11. What Happens When a Module Fails
+## 12. What Happens When a Module Fails
 
 A Module may return:
 
@@ -648,7 +702,7 @@ A Frontier therefore never claims that a stage successfully passed a record that
 
 ---
 
-## 12. Slider Is Optional
+## 13. Slider Is Optional
 
 `Slider<Module>` provides ready-made mechanics for the most common kind of sequential stage.
 
@@ -703,7 +757,7 @@ tape.SetTailRef(own_frontier);
 
 ---
 
-## 13. Basic Rules
+## 14. Basic Rules
 
 Several rules must be followed for correct tract operation.
 
@@ -765,7 +819,7 @@ A view must not be retained and used after Tail is allowed to advance past its p
 
 ---
 
-## 14. Complete Example
+## 15. Complete Example
 
 A complete runnable example is located in:
 
@@ -812,7 +866,7 @@ A good place to start reading the example is `demo_app.cpp`.
 
 ---
 
-## 15. Further Documentation
+## 16. Further Documentation
 
 HOW_TO_USE describes practical use of Core.
 

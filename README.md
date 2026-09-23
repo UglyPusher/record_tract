@@ -43,6 +43,10 @@ The Core is built around three concepts:
 
 `RecordTape` is a bounded, preallocated storage for records.
 
+It stores and transports opaque byte payloads and has no knowledge of application domain types.
+Encoding typed application data into payload bytes, and decoding those bytes back into typed data,
+are responsibilities of the application.
+
 The producer publishes records into the Tape in monotonically increasing `Position` order. Physical slots are reused, but logical positions continue to increase.
 
 ### Frontier
