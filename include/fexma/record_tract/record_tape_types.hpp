@@ -55,4 +55,12 @@ struct PublishResult {
   }
 };
 
+enum class WriteStatus : std::uint8_t {
+  Ok,
+  Closed,
+  Reclaimed,
+  Unpublished,
+  OutOfBounds
+};
+
 } // namespace fexma::record_tract

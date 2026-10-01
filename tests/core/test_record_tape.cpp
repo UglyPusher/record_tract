@@ -133,6 +133,26 @@ using Payload = std::array<std::byte, 16>;
   return true;
 }
 
+[[nodiscard]] bool writes_a_bounded_published_payload_range() {
+  Frontier terminal{};
+  RecordTape tape;
+  tape.SetTailRef(terminal);
+  if (tape.try_write(0, 0, {}) != WriteStatus::Closed ||
+      tape.open({16, 2, 64}) != RecordTapeOpenStatus::Ok ||
+      tape.try_write(0, 0, {}) != WriteStatus::Unpublished ||
+      !tape.try_publish(payload(0)).ok()) return false;
+  const std::array replacement{std::byte{0xaa}, std::byte{0xbb}};
+  if (tape.try_write(0, 15, replacement) != WriteStatus::OutOfBounds ||
+      tape.try_write(0, 4, replacement) != WriteStatus::Ok) return false;
+  const auto view = tape.try_view(0);
+  if (!view.ok() || view.record.payload[4] != replacement[0] ||
+      view.record.payload[5] != replacement[1]) return false;
+  terminal.store(1, std::memory_order_release);
+  const bool reclaimed = tape.try_write(0, 0, replacement) == WriteStatus::Reclaimed;
+  tape.close();
+  return reclaimed;
+}
+
 [[nodiscard]] bool follows_terminal_frontier_for_reuse() {
   Frontier terminal{};
   RecordTape tape;
@@ -237,7 +257,8 @@ int main() {
   if (!failed_open_does_not_freeze_topology()) return 3;
   if (!invalid_payload_size_does_not_advance_head()) return 4;
   if (!defaults_to_head_as_terminal_frontier()) return 5;
-  if (!follows_terminal_frontier_for_reuse()) return 6;
-  if (!producer_and_terminal_frontier_wrap_concurrently()) return 7;
+  if (!writes_a_bounded_published_payload_range()) return 6;
+  if (!follows_terminal_frontier_for_reuse()) return 7;
+  if (!producer_and_terminal_frontier_wrap_concurrently()) return 8;
   return 0;
 }

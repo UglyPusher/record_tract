@@ -47,6 +47,9 @@ public:
   [[nodiscard]] PublishResult
   try_publish(std::span<const std::byte> payload) noexcept;
   [[nodiscard]] AccessResult try_view(Position position) const noexcept;
+  [[nodiscard]] WriteStatus
+  try_write(Position position, std::size_t offset,
+            std::span<const std::byte> bytes) noexcept;
 
   // Topology may be configured until the first successful RecordTape::open().
   // The first successful open freezes topology permanently. Calling

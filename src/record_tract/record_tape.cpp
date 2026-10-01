@@ -170,6 +170,25 @@ AccessResult RecordTape::try_view(Position position) const noexcept {
   return {ViewStatus::Ok, {position, buffer_.block_at_slot(slot)}};
 }
 
+WriteStatus RecordTape::try_write(Position position, std::size_t offset,
+                                  std::span<const std::byte> bytes) noexcept {
+  if (!is_open()) return WriteStatus::Closed;
+  const Position tail = tail_frontier_->load(std::memory_order_acquire);
+  const Position head = head_boundary_.value.load(std::memory_order_acquire);
+  if (tail > head) [[unlikely]] {
+    std::terminate();
+  }
+  if (position < tail) return WriteStatus::Reclaimed;
+  if (position >= head) return WriteStatus::Unpublished;
+  if (offset > payload_size_ || bytes.size() > payload_size_ - offset) {
+    return WriteStatus::OutOfBounds;
+  }
+  const auto slot = static_cast<std::uint32_t>(position % capacity_);
+  std::span<std::byte> block = buffer_.block_at_slot(slot);
+  std::memcpy(block.data() + offset, bytes.data(), bytes.size());
+  return WriteStatus::Ok;
+}
+
 void RecordTape::close() noexcept {
   if (!is_open()) {
     return;

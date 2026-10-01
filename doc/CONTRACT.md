@@ -13,6 +13,8 @@ public:
   RecordTapeOpenStatus open(const RecordTapeConfig&) noexcept;
   PublishResult try_publish(std::span<const std::byte>) noexcept;
   AccessResult try_view(Position) const noexcept;
+  WriteStatus try_write(Position, std::size_t,
+                        std::span<const std::byte>) noexcept;
   void SetTailRef(const Frontier&) noexcept;
   void close() noexcept;
 
@@ -34,6 +36,11 @@ public:
 };
 }
 ```
+
+`try_write` updates a bounded byte range of an already published, retained
+payload. It never publishes a position or changes a Frontier. The caller is
+responsible for topology-level single-writer ownership of the updated range;
+the core validates only lifecycle, retention, publication, and payload bounds.
 
 `Slider` has no upstream object dependency or upstream template parameter. It
 stores only a read-only pointer to the upstream `Frontier`. `GetFrontier()` is a
